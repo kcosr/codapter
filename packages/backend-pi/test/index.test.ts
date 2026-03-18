@@ -30,6 +30,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "  { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'], contextWindow: 128000 },",
     "  { provider: 'pi', id: 'mock-fast', name: 'Mock Fast', reasoning: false, input: ['text'], contextWindow: 64000 },",
     "  { provider: 'openai-codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', reasoning: true, input: ['text', 'image'], contextWindow: 272000 },",
+    "  { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
     "];",
     "",
     "function write(value) {",
@@ -315,9 +316,10 @@ describe("PiBackend", () => {
     await backend.initialize();
 
     const models = await backend.listModels();
-    expect(models).toHaveLength(3);
+    expect(models).toHaveLength(4);
     expect(models[0]?.isDefault).toBe(true);
     expect(models[0]?.id).toBe("pi/mock-default");
+    expect(models.some((model) => model.id === "anthropic/claude-opus-4-6")).toBe(true);
 
     const capabilities = await backend.getCapabilities();
     expect(capabilities).toEqual({
@@ -391,7 +393,7 @@ describe("PiBackend", () => {
         .every((event) => event.turnId === "turn_1")
     ).toBe(true);
     expect(tokenUsageEvent.usage).toMatchObject({
-      modelContextWindow: 272000,
+      modelContextWindow: 1000000,
       total: 12,
     });
 
@@ -432,6 +434,29 @@ describe("PiBackend", () => {
     expect(
       logRecords.some((record) => record.kind === "stdin" && record.raw.includes('"type":"prompt"'))
     ).toBe(true);
+    const setModelLines = logRecords.filter(
+      (record) => record.kind === "stdin" && record.raw.includes('"type":"set_model"')
+    );
+    expect(
+      setModelLines.some(
+        (record) =>
+          record.raw.includes('"provider":"anthropic"') &&
+          record.raw.includes('"modelId":"claude-opus-4-6"')
+      )
+    ).toBe(true);
+    expect(
+      setModelLines.some(
+        (record) =>
+          record.raw.includes('"provider":"pi"') && record.raw.includes('"modelId":"mock-fast"')
+      )
+    ).toBe(false);
+    expect(
+      setModelLines.some(
+        (record) =>
+          record.raw.includes('"provider":"openai-codex"') &&
+          record.raw.includes('"modelId":"gpt-5.3-codex"')
+      )
+    ).toBe(false);
     expect(
       logRecords.some(
         (record) => record.kind === "stdout" && record.raw.includes('"type":"message_update"')
