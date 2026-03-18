@@ -1181,10 +1181,11 @@ export class AppServerConnection {
     event: BackendEvent
   ): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
+    const machine = runtime?.machine;
     const accepted =
-      Boolean(runtime) &&
+      runtime !== undefined &&
+      machine !== null &&
       runtime.activeTurnId === turnId &&
-      Boolean(runtime.machine) &&
       event.turnId === turnId;
 
     await this.upstreamLogWriter?.write({
@@ -1197,7 +1198,7 @@ export class AppServerConnection {
       payload: event,
     });
 
-    if (!accepted || !runtime) {
+    if (!accepted || !machine) {
       return;
     }
 
@@ -1225,7 +1226,7 @@ export class AppServerConnection {
       return;
     }
 
-    const completedTurn = await runtime.machine.handleEvent(event);
+    const completedTurn = await machine.handleEvent(event);
     if (completedTurn) {
       await this.finishTurn(threadId, turnId);
     }

@@ -1,6 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type {
   BackendEvent,
   BackendImageInput,
@@ -57,6 +58,43 @@ interface UpstreamSessionState {
   readonly sessionFile?: string;
   readonly sessionName?: string;
   readonly model?: UpstreamModel;
+}
+
+interface PiLogRecord {
+  readonly at: string;
+  readonly kind: "stdin" | "stdout" | "stderr";
+  readonly raw: string;
+}
+
+class PiLogWriter {
+  private pending: Promise<void> = Promise.resolve();
+  private failed = false;
+
+  constructor(private readonly filePath: string) {}
+
+  write(record: PiLogRecord): void {
+    if (this.failed) {
+      return;
+    }
+
+    const line = `${JSON.stringify(record)}\n`;
+    this.pending = this.pending.then(async () => {
+      await mkdir(dirname(this.filePath), { recursive: true });
+      await appendFile(this.filePath, line, "utf8");
+    });
+
+    void this.pending.catch(() => {
+      this.failed = true;
+    });
+  }
+
+  async flush(): Promise<void> {
+    try {
+      await this.pending;
+    } catch {
+      this.failed = true;
+    }
+  }
 }
 
 function defaultCommand(): string {
@@ -230,6 +268,7 @@ export class PiProcessSession {
   private currentSessionFile: string | undefined;
   private currentSessionName: string | undefined;
   private currentModelId: string | undefined;
+  private readonly logWriter: PiLogWriter | null;
   private stderr = "";
 
   constructor(options: PiProcessLaunchOptions) {
@@ -238,6 +277,11 @@ export class PiProcessSession {
     this.args = options.args ?? defaultArgs(options.sessionDir);
     this.env = options.env ?? process.env;
     this.cwd = options.cwd ?? process.cwd();
+    const logFilePath = this.env.CODAPTER_PI_LOG_FILE;
+    this.logWriter =
+      typeof logFilePath === "string" && logFilePath.length > 0
+        ? new PiLogWriter(logFilePath)
+        : null;
   }
 
   isRunning(): boolean {
@@ -405,6 +449,7 @@ export class PiProcessSession {
 
     this.process = null;
     this.pending.clear();
+    await this.logWriter?.flush();
   }
 
   getStderr(): string {
@@ -424,6 +469,11 @@ export class PiProcessSession {
 
     this.process.stderr.on("data", (chunk) => {
       this.stderr += chunk.toString();
+      this.logWriter?.write({
+        at: new Date().toISOString(),
+        kind: "stderr",
+        raw: chunk.toString(),
+      });
     });
 
     this.process.once("exit", (code, signal) => {
@@ -447,6 +497,12 @@ export class PiProcessSession {
   }
 
   private async handleLine(line: string): Promise<void> {
+    this.logWriter?.write({
+      at: new Date().toISOString(),
+      kind: "stdout",
+      raw: line,
+    });
+
     let parsed: unknown;
     try {
       parsed = parseJsonLine(line);
@@ -650,7 +706,13 @@ export class PiProcessSession {
       throw new Error("Pi process is not running");
     }
 
-    this.process.stdin.write(serializeJsonLine(value));
+    const line = serializeJsonLine(value);
+    this.logWriter?.write({
+      at: new Date().toISOString(),
+      kind: "stdin",
+      raw: line.trimEnd(),
+    });
+    this.process.stdin.write(line);
   }
 
   private applySnapshot(snapshot: PiSessionStateSnapshot): void {

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -272,6 +272,7 @@ describe("PiBackend", () => {
   it("integrates with a real JSONL subprocess", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-"));
     const sessionDir = join(rootDir, "sessions");
+    const logFilePath = join(rootDir, "pi-transport.jsonl");
     await mkdir(sessionDir, { recursive: true });
     const scriptPath = await createMockPiScript(rootDir);
 
@@ -279,6 +280,10 @@ describe("PiBackend", () => {
       sessionDir,
       command: process.execPath,
       args: [scriptPath, sessionDir],
+      env: {
+        ...process.env,
+        CODAPTER_PI_LOG_FILE: logFilePath,
+      },
     });
 
     await backend.initialize();
@@ -356,6 +361,19 @@ describe("PiBackend", () => {
 
     await backend.disposeSession(sessionId);
     await backend.dispose();
+
+    const logRecords = (await readFile(logFilePath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; raw: string });
+    expect(
+      logRecords.some((record) => record.kind === "stdin" && record.raw.includes('"type":"prompt"'))
+    ).toBe(true);
+    expect(
+      logRecords.some(
+        (record) => record.kind === "stdout" && record.raw.includes('"type":"message_update"')
+      )
+    ).toBe(true);
 
     const reopened = createPiBackend({
       sessionDir,
