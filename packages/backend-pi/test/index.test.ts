@@ -61,6 +61,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    id: 'assistant-tool-' + turnId,",
     "    role: 'assistant',",
     "    content: [{ type: 'toolCall', id: 'tool-' + turnId, name: 'bash', arguments: { command: 'echo hi' } }],",
+    "    stopReason: 'toolUse',",
     "    timestamp: Date.now(),",
     "  };",
     "  const toolResultMessage = {",
@@ -76,6 +77,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    id: 'assistant-' + turnId,",
     "    role: 'assistant',",
     "    content: [{ type: 'text', text: 'response-' + turnId }],",
+    "    stopReason: 'stop',",
     "    timestamp: Date.now(),",
     "  };",
     "  const userMessage = {",
@@ -91,11 +93,8 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    write({ type: 'turn_start' });",
     "    write({ type: 'message_start', message: userMessage });",
     "    write({ type: 'message_end', message: userMessage });",
-    "    write({",
-    "      type: 'message_update',",
-    "      message: assistantFinalMessage,",
-    "      assistantMessageEvent: { type: 'text_delta', delta: 'hello from pi' },",
-    "    });",
+    "    write({ type: 'message_start', message: assistantToolMessage });",
+    "    write({ type: 'message_end', message: assistantToolMessage });",
     "    write({",
     "      type: 'tool_execution_start',",
     "      toolCallId: 'tool-' + turnId,",
@@ -122,6 +121,16 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "      method: 'confirm',",
     "      title: 'Confirm',",
     "      message: 'Proceed?',",
+    "    });",
+    "    write({ type: 'message_start', message: toolResultMessage });",
+    "    write({ type: 'message_end', message: toolResultMessage });",
+    "    write({ type: 'turn_end', message: assistantToolMessage, toolResults: [toolResultMessage] });",
+    "    write({ type: 'turn_start' });",
+    "    write({ type: 'message_start', message: assistantFinalMessage });",
+    "    write({",
+    "      type: 'message_update',",
+    "      message: assistantFinalMessage,",
+    "      assistantMessageEvent: { type: 'text_delta', delta: 'response-' + turnId },",
     "    });",
     "    write({ type: 'message_end', message: assistantFinalMessage });",
     "    write({ type: 'turn_end', message: assistantFinalMessage, toolResults: [] });",
@@ -324,6 +333,7 @@ describe("PiBackend", () => {
 
     const events: Array<{
       type: string;
+      turnId?: string;
       requestId?: string;
       usage?: { modelContextWindow: number | null; total: number };
     }> = [];
@@ -368,6 +378,18 @@ describe("PiBackend", () => {
     expect(events.some((event) => event.type === "tool_update")).toBe(true);
     expect(events.some((event) => event.type === "tool_end")).toBe(true);
     expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.type === "text_delta" ||
+            event.type === "tool_start" ||
+            event.type === "tool_update" ||
+            event.type === "tool_end" ||
+            event.type === "message_end"
+        )
+        .every((event) => event.turnId === "turn_1")
+    ).toBe(true);
     expect(tokenUsageEvent.usage).toMatchObject({
       modelContextWindow: 272000,
       total: 12,

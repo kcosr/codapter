@@ -295,8 +295,8 @@ export class TurnStateMachine {
 
     if (state.item.type === "commandExecution") {
       const outputText = toolOutputText(output);
-      if (outputText && !state.item.aggregatedOutput?.includes(outputText)) {
-        state.item.aggregatedOutput = `${state.item.aggregatedOutput ?? ""}${outputText}`;
+      if (outputText && !state.item.aggregatedOutput) {
+        state.item.aggregatedOutput = outputText;
       }
       state.item.status = isError ? "failed" : "completed";
       state.item.exitCode = isError ? 1 : 0;

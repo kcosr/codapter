@@ -657,6 +657,129 @@ describe("AppServerConnection", () => {
           },
         },
       });
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.item?.type === "commandExecution"
+        )
+      ).toMatchObject({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "commandExecution",
+            aggregatedOutput: "ok",
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves backend event order when item startup notifications are slow", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "`",
+        });
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "date",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage: async (message) => {
+        if ("method" in message && message.method === "item/started") {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if ("method" in message) {
+          notifications.push(message as { method: string; params?: Record<string, unknown> });
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "run date", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const agentItemStartedIndex = notifications.findIndex(
+        (notification) =>
+          notification.method === "item/started" &&
+          notification.params?.item?.type === "agentMessage"
+      );
+      const deltaNotifications = notifications.filter(
+        (notification) => notification.method === "item/agentMessage/delta"
+      );
+      const firstDeltaIndex = notifications.findIndex(
+        (notification) => notification.method === "item/agentMessage/delta"
+      );
+
+      expect(agentItemStartedIndex).toBeGreaterThan(-1);
+      expect(firstDeltaIndex).toBeGreaterThan(agentItemStartedIndex);
+      expect(deltaNotifications.map((notification) => notification.params?.delta)).toEqual([
+        "`",
+        "date",
+      ]);
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.item?.type === "agentMessage"
+        )
+      ).toMatchObject({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "agentMessage",
+            text: "`date",
+          },
+        },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

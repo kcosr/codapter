@@ -146,6 +146,7 @@ interface ThreadRuntime {
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
+  eventQueue: Promise<void>;
 }
 
 interface PendingToolUserInputRequest {
@@ -1202,6 +1203,7 @@ export class AppServerConnection {
       latestTurnId: null,
       machine: null,
       subscription: null,
+      eventQueue: Promise.resolve(),
     });
 
     const thread = this.buildThread(entry, []);
@@ -1229,6 +1231,7 @@ export class AppServerConnection {
       latestTurnId: null,
       machine: null,
       subscription: null,
+      eventQueue: Promise.resolve(),
     });
     const history = await backend.readSessionHistory(sessionId);
     const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
@@ -1265,6 +1268,7 @@ export class AppServerConnection {
       latestTurnId: null,
       machine: null,
       subscription: null,
+      eventQueue: Promise.resolve(),
     });
     const history = await backend.readSessionHistory(sessionId);
     const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
@@ -1456,7 +1460,7 @@ export class AppServerConnection {
     runtime.machine = machine;
     runtime.subscription?.dispose();
     runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
-      void this.handleBackendEvent(parsed.threadId, turnId, event);
+      this.enqueueBackendEvent(parsed.threadId, turnId, event);
     });
 
     await this.publishThreadStatus(parsed.threadId);
@@ -1583,6 +1587,26 @@ export class AppServerConnection {
     if (completedTurn) {
       await this.finishTurn(threadId, turnId);
     }
+  }
+
+  private enqueueBackendEvent(threadId: string, turnId: string, event: BackendEvent): void {
+    const runtime = this.threadRuntimes.get(threadId);
+    if (!runtime) {
+      return;
+    }
+
+    const run = async () => {
+      await this.handleBackendEvent(threadId, turnId, event);
+    };
+
+    runtime.eventQueue = runtime.eventQueue.then(run, run).catch((error) => {
+      this.logger.warn("Failed to handle backend event", {
+        threadId,
+        turnId,
+        eventType: event.type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   private async handleToolUserInputRequest(

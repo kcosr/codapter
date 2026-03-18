@@ -279,6 +279,17 @@ function messageRole(message: unknown): string | null {
   return message.role;
 }
 
+function messageStopReason(message: unknown): string | null {
+  if (!isRecord(message) || typeof message.stopReason !== "string") {
+    return null;
+  }
+  return message.stopReason;
+}
+
+function isToolUseAssistantMessage(message: unknown): boolean {
+  return messageRole(message) === "assistant" && messageStopReason(message) === "toolUse";
+}
+
 function toImageContent(
   images?: readonly BackendImageInput[]
 ): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
@@ -656,6 +667,9 @@ export class PiProcessSession {
       case "turn_start":
         return;
       case "turn_end":
+        if (isToolUseAssistantMessage(event.message)) {
+          return;
+        }
         await this.emitTokenUsage(this.currentTurnId ?? "unknown");
         this.currentTurnId = null;
         return;
@@ -664,6 +678,9 @@ export class PiProcessSession {
         return;
       case "message_end":
         if (messageRole(event.message) !== "assistant") {
+          return;
+        }
+        if (isToolUseAssistantMessage(event.message)) {
           return;
         }
         this.emit({
