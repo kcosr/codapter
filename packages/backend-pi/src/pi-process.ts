@@ -38,6 +38,7 @@ export interface PiSessionStateSnapshot {
   readonly sessionFile: string | undefined;
   readonly sessionName: string | undefined;
   readonly modelId: string | undefined;
+  readonly modelContextWindow: number | null;
 }
 
 type PendingRequest = {
@@ -51,6 +52,7 @@ interface UpstreamModel {
   readonly name?: string;
   readonly reasoning?: boolean;
   readonly input?: readonly ("text" | "image")[];
+  readonly contextWindow?: number;
 }
 
 interface UpstreamSessionState {
@@ -208,6 +210,7 @@ function mapTokenUsage(stats: unknown): BackendTokenUsage {
     cacheRead,
     cacheWrite,
     total: totalTokens,
+    modelContextWindow: null,
   };
 }
 
@@ -342,6 +345,7 @@ export class PiProcessSession {
   private currentSessionFile: string | undefined;
   private currentSessionName: string | undefined;
   private currentModelId: string | undefined;
+  private currentModelContextWindow: number | null = null;
   private readonly logWriter: PiLogWriter | null;
   private lastExitCode: number | null = null;
   private lastExitSignal: NodeJS.Signals | null = null;
@@ -446,6 +450,7 @@ export class PiProcessSession {
       sessionFile: typeof state?.sessionFile === "string" ? state.sessionFile : undefined,
       sessionName: typeof state?.sessionName === "string" ? state.sessionName : undefined,
       modelId: parseStateModelId(state?.model),
+      modelContextWindow: parseStateModelContextWindow(state?.model),
     };
   }
 
@@ -462,10 +467,13 @@ export class PiProcessSession {
       provider,
       modelId,
     });
-    const model = response.data?.model;
+    const model = parseUpstreamModelFromResponse(response.data);
     this.currentModelId = model
       ? normalizeModelKey(model.provider, model.id)
       : normalizeModelKey(provider, modelId);
+    this.currentModelContextWindow = model
+      ? parseStateModelContextWindow(model)
+      : this.currentModelContextWindow;
     return response.data;
   }
 
@@ -486,7 +494,10 @@ export class PiProcessSession {
   async getSessionStats(): Promise<BackendTokenUsage> {
     await this.ensureStarted();
     const response = await this.sendRequest<unknown>({ type: "get_session_stats" });
-    return mapTokenUsage(response.data);
+    return {
+      ...mapTokenUsage(response.data),
+      modelContextWindow: this.currentModelContextWindow,
+    };
   }
 
   async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
@@ -835,7 +846,14 @@ export class PiProcessSession {
           eventType: "token_usage",
           raw: JSON.stringify({
             turnId,
-            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+              modelContextWindow: this.currentModelContextWindow,
+            },
             fallback: true,
           }),
         });
@@ -843,7 +861,14 @@ export class PiProcessSession {
           sessionId: this.opaqueSessionId,
           turnId,
           type: "token_usage",
-          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+            modelContextWindow: this.currentModelContextWindow,
+          },
         });
       });
   }
@@ -895,6 +920,7 @@ export class PiProcessSession {
     this.currentSessionFile = snapshot.sessionFile;
     this.currentSessionName = snapshot.sessionName;
     this.currentModelId = snapshot.modelId;
+    this.currentModelContextWindow = snapshot.modelContextWindow;
   }
 
   private async convertImages(
@@ -949,6 +975,29 @@ function parseStateModelId(model: UpstreamModel | undefined): string | undefined
     return undefined;
   }
   return normalizeModelKey(model.provider, model.id);
+}
+
+function parseStateModelContextWindow(model: UpstreamModel | undefined): number | null {
+  if (!model) {
+    return null;
+  }
+  return typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow)
+    ? model.contextWindow
+    : null;
+}
+
+function isUpstreamModel(value: unknown): value is UpstreamModel {
+  return isRecord(value) && typeof value.provider === "string" && typeof value.id === "string";
+}
+
+function parseUpstreamModelFromResponse(value: unknown): UpstreamModel | undefined {
+  if (isRecord(value) && isUpstreamModel(value.model)) {
+    return value.model;
+  }
+  if (isUpstreamModel(value)) {
+    return value;
+  }
+  return undefined;
 }
 
 function normalizeElicitationResponse(

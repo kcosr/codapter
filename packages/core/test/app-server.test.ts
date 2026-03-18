@@ -555,16 +555,25 @@ describe("AppServerConnection", () => {
           isError: false,
         });
         backend.emit(sessionId, {
-          type: "token_usage",
-          sessionId,
-          turnId,
-          usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
-        });
-        backend.emit(sessionId, {
           type: "message_end",
           sessionId,
           turnId,
         });
+        setTimeout(() => {
+          backend.emit(sessionId, {
+            type: "token_usage",
+            sessionId,
+            turnId,
+            usage: {
+              input: 1,
+              output: 2,
+              cacheRead: 3,
+              cacheWrite: 4,
+              total: 10,
+              modelContextWindow: 272000,
+            },
+          });
+        }, 0);
       });
     });
 
@@ -617,15 +626,36 @@ describe("AppServerConnection", () => {
         },
       });
 
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       const methods = notifications.map((notification) => notification.method);
       expect(methods).toContain("turn/started");
-      expect(methods).toContain("item/reasoning/textDelta");
+      expect(methods).toContain("item/reasoning/summaryTextDelta");
       expect(methods).toContain("item/agentMessage/delta");
       expect(methods).toContain("item/commandExecution/outputDelta");
       expect(methods).toContain("thread/tokenUsage/updated");
       expect(methods).toContain("turn/completed");
+      expect(methods.indexOf("thread/tokenUsage/updated")).toBeGreaterThan(
+        methods.indexOf("turn/completed")
+      );
+      expect(
+        notifications.find((notification) => notification.method === "thread/tokenUsage/updated")
+      ).toMatchObject({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId,
+          tokenUsage: {
+            modelContextWindow: 272000,
+            last: {
+              inputTokens: 1,
+              outputTokens: 2,
+              cachedInputTokens: 3,
+              cachedOutputTokens: 4,
+              totalTokens: 10,
+            },
+          },
+        },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

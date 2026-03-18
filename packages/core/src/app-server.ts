@@ -139,6 +139,7 @@ interface ThreadRuntime {
   sessionId: string;
   status: "ready" | "turn_active";
   activeTurnId: string | null;
+  latestTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
 }
@@ -904,6 +905,7 @@ export class AppServerConnection {
       sessionId,
       status: "ready",
       activeTurnId: null,
+      latestTurnId: null,
       machine: null,
       subscription: null,
     });
@@ -930,6 +932,7 @@ export class AppServerConnection {
       sessionId,
       status: "ready",
       activeTurnId: null,
+      latestTurnId: null,
       machine: null,
       subscription: null,
     });
@@ -965,6 +968,7 @@ export class AppServerConnection {
       sessionId,
       status: "ready",
       activeTurnId: null,
+      latestTurnId: null,
       machine: null,
       subscription: null,
     });
@@ -1123,6 +1127,7 @@ export class AppServerConnection {
 
     runtime.status = "turn_active";
     runtime.activeTurnId = turnId;
+    runtime.latestTurnId = turnId;
     runtime.machine = machine;
     runtime.subscription?.dispose();
     runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
@@ -1194,11 +1199,17 @@ export class AppServerConnection {
   ): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
     const machine = runtime?.machine;
-    const accepted =
+    const acceptsTurnStream =
       runtime !== undefined &&
       machine !== null &&
       runtime.activeTurnId === turnId &&
       event.turnId === turnId;
+    const acceptsLateTokenUsage =
+      runtime !== undefined &&
+      event.type === "token_usage" &&
+      runtime.latestTurnId === turnId &&
+      event.turnId === turnId;
+    const accepted = acceptsTurnStream || acceptsLateTokenUsage;
 
     await this.debugLogWriter?.write({
       at: new Date().toISOString(),
@@ -1211,7 +1222,7 @@ export class AppServerConnection {
       payload: event,
     });
 
-    if (!accepted || !machine) {
+    if (!accepted) {
       return;
     }
 
@@ -1225,6 +1236,10 @@ export class AppServerConnection {
         },
         threadId
       );
+      return;
+    }
+
+    if (!machine) {
       return;
     }
 
@@ -1300,8 +1315,6 @@ export class AppServerConnection {
     if (!runtime || runtime.activeTurnId !== turnId) {
       return;
     }
-    runtime.subscription?.dispose();
-    runtime.subscription = null;
     runtime.machine = null;
     runtime.activeTurnId = null;
     runtime.status = "ready";

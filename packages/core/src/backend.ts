@@ -47,6 +47,7 @@ export interface BackendTokenUsage {
   readonly cacheRead: number;
   readonly cacheWrite: number;
   readonly total: number;
+  readonly modelContextWindow: number | null;
 }
 
 export interface BackendBaseEvent {

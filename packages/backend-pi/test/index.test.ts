@@ -20,16 +20,16 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "  sessionId: 'mock-session',",
     "  sessionFile: undefined,",
     "  sessionName: undefined,",
-    "  model: { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'] },",
+    "  model: { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'], contextWindow: 128000 },",
     "  history: [],",
     "  lastElicitationResponse: undefined,",
     "  tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },",
     "};",
     "",
     "const availableModels = [",
-    "  { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'] },",
-    "  { provider: 'pi', id: 'mock-fast', name: 'Mock Fast', reasoning: false, input: ['text'] },",
-    "  { provider: 'openai-codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', reasoning: true, input: ['text', 'image'] },",
+    "  { provider: 'pi', id: 'mock-default', name: 'Mock Default', reasoning: true, input: ['text', 'image'], contextWindow: 128000 },",
+    "  { provider: 'pi', id: 'mock-fast', name: 'Mock Fast', reasoning: false, input: ['text'], contextWindow: 64000 },",
+    "  { provider: 'openai-codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', reasoning: true, input: ['text', 'image'], contextWindow: 272000 },",
     "];",
     "",
     "function write(value) {",
@@ -63,16 +63,19 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    content: [{ type: 'text', text: 'response-' + turnId }],",
     "    timestamp: Date.now(),",
     "  };",
-    "",
-    "  state.history.push({",
+    "  const userMessage = {",
     "    id: 'user-' + turnId,",
     "    role: 'user',",
-    "    content: { text: message },",
+    "    content: [{ type: 'text', text: message }],",
     "    timestamp: Date.now(),",
-    "  });",
+    "  };",
+    "",
+    "  state.history.push(userMessage);",
     "",
     "  setTimeout(() => {",
     "    write({ type: 'turn_start' });",
+    "    write({ type: 'message_start', message: userMessage });",
+    "    write({ type: 'message_end', message: userMessage });",
     "    write({",
     "      type: 'message_update',",
     "      message: assistantMessage,",
@@ -302,7 +305,11 @@ describe("PiBackend", () => {
     const sessionId = await backend.createSession();
     expect(sessionId.startsWith("pi_session_")).toBe(true);
 
-    const events: Array<{ type: string; requestId?: string }> = [];
+    const events: Array<{
+      type: string;
+      requestId?: string;
+      usage?: { modelContextWindow: number | null; total: number };
+    }> = [];
     const subscription = backend.onEvent(sessionId, (event) => {
       events.push(event);
     });
@@ -332,13 +339,22 @@ describe("PiBackend", () => {
     expect(elicitation).toBeDefined();
 
     await backend.respondToElicitation(sessionId, elicitation.requestId, { confirmed: true });
-    await waitFor(() => events.find((event) => event.type === "token_usage"));
+    const tokenUsageEvent = await waitFor(
+      () =>
+        events.find((event) => event.type === "token_usage") as
+          | { usage?: { modelContextWindow: number | null; total: number } }
+          | undefined
+    );
 
     expect(events.some((event) => event.type === "text_delta")).toBe(true);
     expect(events.some((event) => event.type === "tool_start")).toBe(true);
     expect(events.some((event) => event.type === "tool_update")).toBe(true);
     expect(events.some((event) => event.type === "tool_end")).toBe(true);
-    expect(events.some((event) => event.type === "message_end")).toBe(true);
+    expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
+    expect(tokenUsageEvent.usage).toMatchObject({
+      modelContextWindow: 272000,
+      total: 12,
+    });
 
     const history = await backend.readSessionHistory(sessionId);
     expect(history.some((message) => message.role === "user")).toBe(true);

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
-import type { ThreadItem, Turn, TurnError } from "./protocol.js";
+import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
 
 export interface TurnStateNotificationSink {
   notify(method: string, params: unknown): Promise<void>;
@@ -173,16 +173,16 @@ export class TurnStateMachine {
     if (!item || item.type !== "reasoning") {
       throw new Error(`Reasoning item missing for ${itemId}`);
     }
-    if (item.content.length === 0) {
-      item.content.push("");
+    if (item.summary.length === 0) {
+      item.summary.push("");
     }
-    item.content[0] += delta;
-    await this.sink.notify("item/reasoning/textDelta", {
+    item.summary[0] += delta;
+    await this.sink.notify("item/reasoning/summaryTextDelta", {
       threadId: this.threadId,
       turnId: this.turn.id,
       itemId,
       delta,
-      contentIndex: 0,
+      summaryIndex: 0,
     });
   }
 
@@ -405,12 +405,15 @@ export class TurnStateMachine {
   }
 }
 
-export function toThreadTokenUsage(usage: BackendTokenUsage) {
+export function toThreadTokenUsage(usage: BackendTokenUsage): ThreadTokenUsage {
   return {
-    inputTokens: usage.input,
-    outputTokens: usage.output,
-    cachedInputTokens: usage.cacheRead,
-    cachedOutputTokens: usage.cacheWrite,
-    totalTokens: usage.total,
+    modelContextWindow: usage.modelContextWindow,
+    last: {
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cachedInputTokens: usage.cacheRead,
+      cachedOutputTokens: usage.cacheWrite,
+      totalTokens: usage.total,
+    },
   };
 }

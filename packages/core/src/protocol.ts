@@ -494,12 +494,17 @@ export type ThreadMetadataUpdateResponse = { thread: Thread };
 export type ThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsubscribed";
 export type ThreadUnsubscribeResponse = { status: ThreadUnsubscribeStatus };
 
-export type ThreadTokenUsage = {
+export type ThreadTokenUsageTotals = {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
   cachedOutputTokens: number;
   totalTokens: number;
+};
+
+export type ThreadTokenUsage = {
+  modelContextWindow: number | null;
+  last: ThreadTokenUsageTotals;
 };
 
 export type CommandExecTerminalSize = {
