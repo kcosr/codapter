@@ -25,6 +25,7 @@ export interface PiBackendOptions {
   readonly args?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;
+  readonly debugLogFilePath?: string | null;
 }
 
 interface ManagedSession {
@@ -121,6 +122,12 @@ export class PiBackend implements IBackend {
     }
     if (options.cwd !== undefined) {
       launchOptions.cwd = options.cwd;
+    }
+    if (options.debugLogFilePath !== undefined) {
+      launchOptions.env = {
+        ...(launchOptions.env ?? {}),
+        CODAPTER_DEBUG_LOG_FILE: options.debugLogFilePath ?? "",
+      };
     }
     this.launchOptions = launchOptions;
     this.stateStore = new PiBackendStateStore(this.sessionDir);

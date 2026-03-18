@@ -720,7 +720,7 @@ describe("AppServerConnection", () => {
     });
     const connection = new AppServerConnection({
       backend,
-      upstreamLogFilePath: logFilePath,
+      debugLogFilePath: logFilePath,
       onMessage() {},
     });
 
@@ -756,6 +756,7 @@ describe("AppServerConnection", () => {
       });
 
       await new Promise((resolve) => setTimeout(resolve, 20));
+      await connection.dispose();
       const lines = (await readFile(logFilePath, "utf8")).trim().split("\n");
       const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
 
@@ -771,6 +772,12 @@ describe("AppServerConnection", () => {
         records.some(
           (record) => record.kind === "notification" && record.method === "item/agentMessage/delta"
         )
+      ).toBe(true);
+      expect(
+        records.some((record) => record.component === "app-server" && record.kind === "startup")
+      ).toBe(true);
+      expect(
+        records.some((record) => record.component === "app-server" && record.kind === "shutdown")
       ).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });

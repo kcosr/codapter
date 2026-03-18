@@ -62,12 +62,18 @@ interface UpstreamSessionState {
 
 interface PiLogRecord {
   readonly at: string;
-  readonly kind: "stdin" | "stdout" | "stderr" | "parsed-event";
+  readonly component: "pi-process";
+  readonly kind: "startup" | "shutdown" | "stdin" | "stdout" | "stderr" | "parsed-event";
   readonly raw: string;
   readonly eventType?: string;
   readonly assistantEventType?: string;
   readonly emittedType?: string;
   readonly delta?: string;
+  readonly pid?: number;
+  readonly command?: string;
+  readonly sessionId?: string;
+  readonly exitCode?: number | null;
+  readonly signal?: NodeJS.Signals | null;
 }
 
 class PiLogWriter {
@@ -273,6 +279,8 @@ export class PiProcessSession {
   private currentSessionName: string | undefined;
   private currentModelId: string | undefined;
   private readonly logWriter: PiLogWriter | null;
+  private lastExitCode: number | null = null;
+  private lastExitSignal: NodeJS.Signals | null = null;
   private stderr = "";
 
   constructor(options: PiProcessLaunchOptions) {
@@ -281,7 +289,7 @@ export class PiProcessSession {
     this.args = options.args ?? defaultArgs(options.sessionDir);
     this.env = options.env ?? process.env;
     this.cwd = options.cwd ?? process.cwd();
-    const logFilePath = this.env.CODAPTER_PI_LOG_FILE;
+    const logFilePath = this.env.CODAPTER_DEBUG_LOG_FILE;
     this.logWriter =
       typeof logFilePath === "string" && logFilePath.length > 0
         ? new PiLogWriter(logFilePath)
@@ -453,6 +461,15 @@ export class PiProcessSession {
 
     this.process = null;
     this.pending.clear();
+    this.logWriter?.write({
+      at: new Date().toISOString(),
+      component: "pi-process",
+      kind: "shutdown",
+      raw: "",
+      exitCode: this.lastExitCode,
+      signal: this.lastExitSignal,
+      sessionId: this.opaqueSessionId,
+    });
     await this.logWriter?.flush();
   }
 
@@ -475,12 +492,15 @@ export class PiProcessSession {
       this.stderr += chunk.toString();
       this.logWriter?.write({
         at: new Date().toISOString(),
+        component: "pi-process",
         kind: "stderr",
         raw: chunk.toString(),
       });
     });
 
     this.process.once("exit", (code, signal) => {
+      this.lastExitCode = code;
+      this.lastExitSignal = signal;
       const error = new Error(
         `Pi process exited${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}`
       );
@@ -497,12 +517,23 @@ export class PiProcessSession {
       void this.handleLine(line);
     });
 
+    this.logWriter?.write({
+      at: new Date().toISOString(),
+      component: "pi-process",
+      kind: "startup",
+      ...(this.process.pid !== undefined ? { pid: this.process.pid } : {}),
+      command: this.command,
+      sessionId: this.opaqueSessionId,
+      raw: "",
+    });
+
     await this.sendRequest({ type: "get_state" });
   }
 
   private async handleLine(line: string): Promise<void> {
     this.logWriter?.write({
       at: new Date().toISOString(),
+      component: "pi-process",
       kind: "stdout",
       raw: line,
     });
@@ -633,6 +664,7 @@ export class PiProcessSession {
     if (!assistantEvent || typeof assistantEvent.type !== "string") {
       this.logWriter?.write({
         at: new Date().toISOString(),
+        component: "pi-process",
         kind: "parsed-event",
         eventType: "message_update",
         raw: JSON.stringify(event),
@@ -644,6 +676,7 @@ export class PiProcessSession {
       const delta = String(assistantEvent.delta ?? "");
       this.logWriter?.write({
         at: new Date().toISOString(),
+        component: "pi-process",
         kind: "parsed-event",
         eventType: "message_update",
         assistantEventType: assistantEvent.type,
@@ -664,6 +697,7 @@ export class PiProcessSession {
       const delta = String(assistantEvent.delta ?? "");
       this.logWriter?.write({
         at: new Date().toISOString(),
+        component: "pi-process",
         kind: "parsed-event",
         eventType: "message_update",
         assistantEventType: assistantEvent.type,
@@ -683,6 +717,7 @@ export class PiProcessSession {
     if (assistantEvent.type === "error") {
       this.logWriter?.write({
         at: new Date().toISOString(),
+        component: "pi-process",
         kind: "parsed-event",
         eventType: "message_update",
         assistantEventType: assistantEvent.type,
@@ -700,6 +735,7 @@ export class PiProcessSession {
 
     this.logWriter?.write({
       at: new Date().toISOString(),
+      component: "pi-process",
       kind: "parsed-event",
       eventType: "message_update",
       assistantEventType: assistantEvent.type,
@@ -756,6 +792,7 @@ export class PiProcessSession {
     const line = serializeJsonLine(value);
     this.logWriter?.write({
       at: new Date().toISOString(),
+      component: "pi-process",
       kind: "stdin",
       raw: line.trimEnd(),
     });

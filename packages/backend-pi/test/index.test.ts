@@ -280,10 +280,7 @@ describe("PiBackend", () => {
       sessionDir,
       command: process.execPath,
       args: [scriptPath, sessionDir],
-      env: {
-        ...process.env,
-        CODAPTER_PI_LOG_FILE: logFilePath,
-      },
+      debugLogFilePath: logFilePath,
     });
 
     await backend.initialize();
@@ -381,6 +378,8 @@ describe("PiBackend", () => {
           record.raw.includes('"assistantMessageEvent":{"type":"text_delta"')
       )
     ).toBe(true);
+    expect(logRecords.some((record) => record.kind === "startup")).toBe(true);
+    expect(logRecords.some((record) => record.kind === "shutdown")).toBe(true);
 
     const reopened = createPiBackend({
       sessionDir,

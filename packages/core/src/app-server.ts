@@ -122,7 +122,7 @@ export interface AppServerConnectionOptions {
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
-  readonly upstreamLogFilePath?: string | null;
+  readonly debugLogFilePath?: string | null;
   readonly threadRegistry?: ThreadRegistry;
   readonly onMessage?: (message: AppServerOutgoingMessage) => void | Promise<void>;
 }
@@ -203,9 +203,10 @@ function defaultLogger(): AppServerLogger {
   };
 }
 
-interface UpstreamLogRecord {
+interface DebugLogRecord {
   readonly at: string;
-  readonly kind: string;
+  readonly component: "app-server";
+  readonly kind: "startup" | "shutdown" | "backend-event" | "notification";
   readonly threadId?: string;
   readonly turnId?: string;
   readonly accepted?: boolean;
@@ -214,7 +215,7 @@ interface UpstreamLogRecord {
   readonly payload?: unknown;
 }
 
-class UpstreamLogWriter {
+class DebugLogWriter {
   private pending: Promise<void> = Promise.resolve();
   private failed = false;
 
@@ -223,7 +224,7 @@ class UpstreamLogWriter {
     private readonly logger: AppServerLogger
   ) {}
 
-  async write(record: UpstreamLogRecord): Promise<void> {
+  async write(record: DebugLogRecord): Promise<void> {
     if (this.failed) {
       return;
     }
@@ -238,7 +239,7 @@ class UpstreamLogWriter {
       await this.pending;
     } catch (error) {
       this.failed = true;
-      this.logger.warn("Failed to write upstream event log", {
+      this.logger.warn("Failed to write debug log", {
         filePath: this.filePath,
         error: error instanceof Error ? error.message : String(error),
       });
@@ -465,7 +466,7 @@ export class AppServerConnection {
   private readonly configStore: InMemoryConfigStore;
   private readonly identity: AppServerIdentity;
   private readonly logger: AppServerLogger;
-  private readonly upstreamLogWriter: UpstreamLogWriter | null;
+  private readonly debugLogWriter: DebugLogWriter | null;
   private readonly threadRegistry: ThreadRegistry;
   private readonly onMessage:
     | ((message: AppServerOutgoingMessage) => void | Promise<void>)
@@ -489,11 +490,11 @@ export class AppServerConnection {
     this.configStore = options.configStore ?? new InMemoryConfigStore();
     this.identity = options.identity ?? createIdentity();
     this.logger = options.logger ?? defaultLogger();
-    const upstreamLogFilePath =
-      options.upstreamLogFilePath ?? process.env.CODAPTER_UPSTREAM_LOG_FILE ?? null;
-    this.upstreamLogWriter =
-      upstreamLogFilePath && upstreamLogFilePath.length > 0
-        ? new UpstreamLogWriter(upstreamLogFilePath, this.logger)
+    const debugLogFilePath =
+      options.debugLogFilePath ?? process.env.CODAPTER_DEBUG_LOG_FILE ?? null;
+    this.debugLogWriter =
+      debugLogFilePath && debugLogFilePath.length > 0
+        ? new DebugLogWriter(debugLogFilePath, this.logger)
         : null;
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
@@ -502,6 +503,11 @@ export class AppServerConnection {
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
       },
+    });
+    void this.debugLogWriter?.write({
+      at: new Date().toISOString(),
+      component: "app-server",
+      kind: "startup",
     });
   }
 
@@ -515,7 +521,12 @@ export class AppServerConnection {
     this.pendingToolUserInputRequests.clear();
     this.threadRuntimes.clear();
     await this.commandExecManager.dispose();
-    await this.upstreamLogWriter?.flush();
+    await this.debugLogWriter?.write({
+      at: new Date().toISOString(),
+      component: "app-server",
+      kind: "shutdown",
+    });
+    await this.debugLogWriter?.flush();
   }
 
   async handleMessage(message: unknown): Promise<JsonRpcResponse | null> {
@@ -671,8 +682,9 @@ export class AppServerConnection {
 
     const notification = this.emitNotification(method, params);
     if (notification) {
-      await this.upstreamLogWriter?.write({
+      await this.debugLogWriter?.write({
         at: new Date().toISOString(),
+        component: "app-server",
         kind: "notification",
         threadId,
         method,
@@ -1188,8 +1200,9 @@ export class AppServerConnection {
       runtime.activeTurnId === turnId &&
       event.turnId === turnId;
 
-    await this.upstreamLogWriter?.write({
+    await this.debugLogWriter?.write({
       at: new Date().toISOString(),
+      component: "app-server",
       kind: "backend-event",
       threadId,
       turnId,
