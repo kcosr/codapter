@@ -1,7 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { validateHeaderValue } from "node:http";
 import { resolve } from "node:path";
-import type { BackendMessage, IBackend } from "./backend.js";
+import type {
+  BackendEvent,
+  BackendImageInput,
+  BackendMessage,
+  Disposable,
+  IBackend,
+} from "./backend.js";
+import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
   type JsonRpcMessage,
@@ -12,6 +20,11 @@ import {
   success,
 } from "./jsonrpc.js";
 import type {
+  CommandExecParams,
+  CommandExecResizeParams,
+  CommandExecResponse,
+  CommandExecTerminateParams,
+  CommandExecWriteParams,
   ConfigBatchWriteParams,
   ConfigReadParams,
   ConfigReadResponse,
@@ -53,12 +66,18 @@ import type {
   ThreadUnsubscribeParams,
   ThreadUnsubscribeResponse,
   Turn,
+  TurnInterruptParams,
+  TurnInterruptResponse,
+  TurnStartParams,
+  TurnStartResponse,
+  UserInput,
 } from "./protocol.js";
 import {
   ThreadRegistry,
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
+import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
 const JSON_RPC_INVALID_PARAMS = -32602;
@@ -100,8 +119,15 @@ interface ConnectionState {
   initializedNotificationReceived: boolean;
   clientInfo: InitializeParams["clientInfo"] | null;
   optedOutNotifications: Set<string>;
-  loadedThreadIds: Set<string>;
   unsubscribedThreadIds: Set<string>;
+}
+
+interface ThreadRuntime {
+  sessionId: string;
+  status: "ready" | "turn_active";
+  activeTurnId: string | null;
+  machine: TurnStateMachine | null;
+  subscription: Disposable | null;
 }
 
 function detectPlatformFamily(): string {
@@ -205,6 +231,24 @@ function buildTurns(history: readonly BackendMessage[]): Turn[] {
   });
 }
 
+function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
+  if (!runtime) {
+    return { type: "notLoaded" };
+  }
+  if (runtime.status === "turn_active") {
+    return { type: "active", activeFlags: ["turn"] };
+  }
+  return { type: "idle" };
+}
+
+function turnErrorFromUnknown(error: unknown) {
+  return {
+    message: error instanceof Error ? error.message : String(error),
+    codexErrorInfo: null,
+    additionalDetails: null,
+  };
+}
+
 export class AppServerConnection {
   private readonly backend: IBackend | undefined;
   private readonly configStore: InMemoryConfigStore;
@@ -214,12 +258,13 @@ export class AppServerConnection {
   private readonly onNotification:
     | ((notification: AppServerNotification) => void | Promise<void>)
     | undefined;
+  private readonly commandExecManager: CommandExecManager;
+  private readonly threadRuntimes = new Map<string, ThreadRuntime>();
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
     clientInfo: null,
     optedOutNotifications: new Set(),
-    loadedThreadIds: new Set(),
     unsubscribedThreadIds: new Set(),
   };
 
@@ -231,6 +276,19 @@ export class AppServerConnection {
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onNotification = options.onNotification;
+    this.commandExecManager = new CommandExecManager({
+      onNotification: async (notification) => {
+        await this.publish(notification.method, notification.params);
+      },
+    });
+  }
+
+  async dispose(): Promise<void> {
+    for (const runtime of this.threadRuntimes.values()) {
+      runtime.subscription?.dispose();
+    }
+    this.threadRuntimes.clear();
+    await this.commandExecManager.dispose();
   }
 
   async handleMessage(message: unknown): Promise<JsonRpcResponse | null> {
@@ -294,6 +352,18 @@ export class AppServerConnection {
           return success(request.id, await this.handleThreadMetadataUpdate(request.params));
         case "thread/unsubscribe":
           return success(request.id, this.handleThreadUnsubscribe(request.params));
+        case "turn/start":
+          return success(request.id, await this.handleTurnStart(request.params));
+        case "turn/interrupt":
+          return success(request.id, await this.handleTurnInterrupt(request.params));
+        case "command/exec":
+          return success(request.id, await this.handleCommandExec(request.params));
+        case "command/exec/write":
+          return success(request.id, await this.handleCommandExecWrite(request.params));
+        case "command/exec/resize":
+          return success(request.id, await this.handleCommandExecResize(request.params));
+        case "command/exec/terminate":
+          return success(request.id, await this.handleCommandExecTerminate(request.params));
         default:
           this.logger.warn("Unrecognized RPC method", {
             method: request.method,
@@ -414,7 +484,6 @@ export class AppServerConnection {
       if (typeof candidate.capabilities !== "object") {
         throw new Error("Invalid initialize params");
       }
-
       const raw = candidate.capabilities as Record<string, unknown>;
       capabilities = {
         experimentalApi: Boolean(raw.experimentalApi),
@@ -510,6 +579,9 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadStartParams;
     const sessionId = await backend.createSession();
+    if (parsed.model) {
+      await backend.setModel(sessionId, parsed.model);
+    }
     const entry = await this.threadRegistry.create({
       backendSessionId: sessionId,
       backendType: "pi",
@@ -519,14 +591,17 @@ export class AppServerConnection {
       gitInfo: null,
     });
 
-    this.state.loadedThreadIds.add(entry.threadId);
+    this.threadRuntimes.set(entry.threadId, {
+      sessionId,
+      status: "ready",
+      activeTurnId: null,
+      machine: null,
+      subscription: null,
+    });
+
     const thread = this.buildThread(entry, []);
     await this.publish("thread/started", { thread }, entry.threadId);
-    await this.publish(
-      "thread/status/changed",
-      { threadId: entry.threadId, status: thread.status },
-      entry.threadId
-    );
+    await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
@@ -538,15 +613,20 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
-    await backend.resumeSession(entry.backendSessionId);
-    this.state.loadedThreadIds.add(entry.threadId);
-    const history = await backend.readSessionHistory(entry.backendSessionId);
+    const sessionId = await backend.resumeSession(entry.backendSessionId);
+    if (parsed.model) {
+      await backend.setModel(sessionId, parsed.model);
+    }
+    this.threadRuntimes.set(entry.threadId, {
+      sessionId,
+      status: "ready",
+      activeTurnId: null,
+      machine: null,
+      subscription: null,
+    });
+    const history = await backend.readSessionHistory(sessionId);
     const thread = this.buildThread(entry, buildTurns(history));
-    await this.publish(
-      "thread/status/changed",
-      { threadId: entry.threadId, status: thread.status },
-      entry.threadId
-    );
+    await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
@@ -558,9 +638,12 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
-    const forkedSessionId = await backend.forkSession(sourceEntry.backendSessionId);
+    const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
+    if (parsed.model) {
+      await backend.setModel(sessionId, parsed.model);
+    }
     const entry = await this.threadRegistry.create({
-      backendSessionId: forkedSessionId,
+      backendSessionId: sessionId,
       backendType: sourceEntry.backendType,
       cwd: parsed.cwd ?? sourceEntry.cwd,
       preview: sourceEntry.preview,
@@ -569,15 +652,17 @@ export class AppServerConnection {
       gitInfo: sourceEntry.gitInfo,
     });
 
-    this.state.loadedThreadIds.add(entry.threadId);
-    const history = await backend.readSessionHistory(forkedSessionId);
+    this.threadRuntimes.set(entry.threadId, {
+      sessionId,
+      status: "ready",
+      activeTurnId: null,
+      machine: null,
+      subscription: null,
+    });
+    const history = await backend.readSessionHistory(sessionId);
     const thread = this.buildThread(entry, buildTurns(history));
     await this.publish("thread/started", { thread }, entry.threadId);
-    await this.publish(
-      "thread/status/changed",
-      { threadId: entry.threadId, status: thread.status },
-      entry.threadId
-    );
+    await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
       parsed.model ?? null,
@@ -588,13 +673,15 @@ export class AppServerConnection {
   private async handleThreadRead(params: unknown): Promise<ThreadReadResponse> {
     const parsed = params as ThreadReadParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    const runtime = this.threadRuntimes.get(parsed.threadId);
     const turns =
       parsed.includeTurns && this.backend
         ? buildTurns(await this.backend.readSessionHistory(entry.backendSessionId))
         : [];
-    return {
-      thread: this.buildThread(entry, turns),
-    };
+    if (runtime?.machine && parsed.includeTurns) {
+      turns.push(runtime.machine.snapshot);
+    }
+    return { thread: this.buildThread(entry, turns) };
   }
 
   private async handleThreadList(params: unknown): Promise<ThreadListResponse> {
@@ -629,7 +716,6 @@ export class AppServerConnection {
 
     const start = Number.isFinite(cursor) && cursor >= 0 ? cursor : 0;
     const slice = entries.slice(start, start + limit);
-
     return {
       data: slice.map((entry) => this.buildThread(entry, [])),
       nextCursor: start + limit < entries.length ? String(start + limit) : null,
@@ -638,7 +724,7 @@ export class AppServerConnection {
 
   private handleThreadLoadedList(params: unknown): ThreadLoadedListResponse {
     const parsed = (params ?? {}) as Partial<ThreadLoadedListParams>;
-    const loaded = [...this.state.loadedThreadIds.values()].sort();
+    const loaded = [...this.threadRuntimes.keys()].sort();
     const start = Number.isFinite(Number(parsed.cursor ?? "0")) ? Number(parsed.cursor ?? "0") : 0;
     const limit = parsed.limit ?? loaded.length;
     return {
@@ -662,10 +748,14 @@ export class AppServerConnection {
   }
 
   private async handleThreadArchive(params: unknown): Promise<ThreadArchiveResponse> {
+    const backend = this.requireBackend();
     const parsed = params as ThreadArchiveParams;
-    await this.getThreadEntry(parsed.threadId);
+    const entry = await this.getThreadEntry(parsed.threadId);
+    const runtime = this.threadRuntimes.get(parsed.threadId);
+    runtime?.subscription?.dispose();
+    this.threadRuntimes.delete(parsed.threadId);
+    await backend.disposeSession(entry.backendSessionId);
     await this.threadRegistry.update(parsed.threadId, { archived: true });
-    this.state.loadedThreadIds.delete(parsed.threadId);
     await this.publish("thread/archived", { threadId: parsed.threadId }, parsed.threadId);
     return {};
   }
@@ -688,7 +778,7 @@ export class AppServerConnection {
 
   private handleThreadUnsubscribe(params: unknown): ThreadUnsubscribeResponse {
     const parsed = params as ThreadUnsubscribeParams;
-    if (!this.state.loadedThreadIds.has(parsed.threadId)) {
+    if (!this.threadRuntimes.has(parsed.threadId)) {
       return { status: "notLoaded" };
     }
     if (this.state.unsubscribedThreadIds.has(parsed.threadId)) {
@@ -696,6 +786,176 @@ export class AppServerConnection {
     }
     this.state.unsubscribedThreadIds.add(parsed.threadId);
     return { status: "unsubscribed" };
+  }
+
+  private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
+    const backend = this.requireBackend();
+    const parsed = params as TurnStartParams;
+    const entry = await this.getThreadEntry(parsed.threadId);
+    const runtime = this.getReadyThreadRuntime(parsed.threadId);
+    const { text, images, preview } = this.normalizeUserInputs(parsed.input);
+    if (parsed.model) {
+      await backend.setModel(runtime.sessionId, parsed.model);
+    }
+    if (!entry.preview && preview) {
+      await this.threadRegistry.update(parsed.threadId, { preview });
+    }
+    if (parsed.cwd) {
+      await this.threadRegistry.update(parsed.threadId, { cwd: parsed.cwd });
+    }
+
+    const turnId = randomUUID();
+    const cwd = parsed.cwd ?? entry.cwd ?? process.cwd();
+    const machine = new TurnStateMachine(parsed.threadId, turnId, cwd, {
+      notify: async (method, payload) => {
+        await this.publish(method, payload, parsed.threadId);
+      },
+    });
+
+    runtime.status = "turn_active";
+    runtime.activeTurnId = turnId;
+    runtime.machine = machine;
+    runtime.subscription?.dispose();
+    runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
+      void this.handleBackendEvent(parsed.threadId, turnId, event);
+    });
+
+    await this.publishThreadStatus(parsed.threadId);
+    await machine.emitStarted();
+
+    try {
+      await backend.prompt(runtime.sessionId, turnId, text, images);
+    } catch (error) {
+      const turn = await machine.handleEvent({
+        type: "error",
+        sessionId: runtime.sessionId,
+        turnId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (turn) {
+        await this.finishTurn(parsed.threadId, turnId);
+      }
+      throw error;
+    }
+
+    return {
+      turn: machine.snapshot,
+    };
+  }
+
+  private async handleTurnInterrupt(params: unknown): Promise<TurnInterruptResponse> {
+    const backend = this.requireBackend();
+    const parsed = params as TurnInterruptParams;
+    const runtime = this.threadRuntimes.get(parsed.threadId);
+    if (!runtime || runtime.status !== "turn_active" || runtime.activeTurnId !== parsed.turnId) {
+      throw new Error(`No active turn ${parsed.turnId} for thread ${parsed.threadId}`);
+    }
+
+    await backend.abort(runtime.sessionId);
+    if (runtime.machine) {
+      await runtime.machine.interrupt();
+    }
+    await this.finishTurn(parsed.threadId, parsed.turnId);
+    return {};
+  }
+
+  private async handleCommandExec(params: unknown): Promise<CommandExecResponse> {
+    return await this.commandExecManager.execute(params as CommandExecParams);
+  }
+
+  private async handleCommandExecWrite(params: unknown): Promise<Record<string, never>> {
+    await this.commandExecManager.write(params as CommandExecWriteParams);
+    return {};
+  }
+
+  private async handleCommandExecResize(params: unknown): Promise<Record<string, never>> {
+    await this.commandExecManager.resize(params as CommandExecResizeParams);
+    return {};
+  }
+
+  private async handleCommandExecTerminate(params: unknown): Promise<Record<string, never>> {
+    await this.commandExecManager.terminate(params as CommandExecTerminateParams);
+    return {};
+  }
+
+  private async handleBackendEvent(
+    threadId: string,
+    turnId: string,
+    event: BackendEvent
+  ): Promise<void> {
+    const runtime = this.threadRuntimes.get(threadId);
+    if (
+      !runtime ||
+      runtime.activeTurnId !== turnId ||
+      !runtime.machine ||
+      event.turnId !== turnId
+    ) {
+      return;
+    }
+
+    if (event.type === "token_usage") {
+      await this.publish(
+        "thread/tokenUsage/updated",
+        {
+          threadId,
+          turnId,
+          tokenUsage: toThreadTokenUsage(event.usage),
+        },
+        threadId
+      );
+      return;
+    }
+
+    const completedTurn = await runtime.machine.handleEvent(event);
+    if (completedTurn) {
+      await this.finishTurn(threadId, turnId);
+    }
+  }
+
+  private async finishTurn(threadId: string, turnId: string): Promise<void> {
+    const runtime = this.threadRuntimes.get(threadId);
+    if (!runtime || runtime.activeTurnId !== turnId) {
+      return;
+    }
+    runtime.subscription?.dispose();
+    runtime.subscription = null;
+    runtime.machine = null;
+    runtime.activeTurnId = null;
+    runtime.status = "ready";
+    await this.publishThreadStatus(threadId);
+  }
+
+  private normalizeUserInputs(input: readonly UserInput[]): {
+    text: string;
+    images: BackendImageInput[];
+    preview: string;
+  } {
+    const textParts: string[] = [];
+    const images: BackendImageInput[] = [];
+
+    for (const item of input) {
+      switch (item.type) {
+        case "text":
+          textParts.push(item.text);
+          break;
+        case "image":
+          images.push({ type: "image", url: item.url });
+          break;
+        case "localImage":
+          images.push({ type: "localImage", path: item.path });
+          break;
+        case "skill":
+        case "mention":
+          throw new Error(`Unsupported user input type: ${item.type}`);
+      }
+    }
+
+    const text = textParts.join("\n").trim();
+    return {
+      text,
+      images,
+      preview: text.slice(0, 120),
+    };
   }
 
   private applyGitInfoPatch(
@@ -723,7 +983,7 @@ export class AppServerConnection {
       modelProvider: entry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       createdAt: toUnixSeconds(entry.createdAt),
       updatedAt: toUnixSeconds(entry.updatedAt),
-      status: this.buildThreadStatus(entry.threadId),
+      status: runtimeToThreadStatus(this.threadRuntimes.get(entry.threadId)),
       path: null,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
@@ -734,10 +994,6 @@ export class AppServerConnection {
       name: entry.name,
       turns,
     };
-  }
-
-  private buildThreadStatus(threadId: string): ThreadStatus {
-    return this.state.loadedThreadIds.has(threadId) ? { type: "idle" } : { type: "notLoaded" };
   }
 
   private async buildThreadExecutionResponse(
@@ -759,6 +1015,28 @@ export class AppServerConnection {
       sandbox: DEFAULT_SANDBOX,
       reasoningEffort: defaultModel?.defaultReasoningEffort ?? null,
     };
+  }
+
+  private async publishThreadStatus(threadId: string): Promise<void> {
+    await this.publish(
+      "thread/status/changed",
+      {
+        threadId,
+        status: runtimeToThreadStatus(this.threadRuntimes.get(threadId)),
+      },
+      threadId
+    );
+  }
+
+  private getReadyThreadRuntime(threadId: string): ThreadRuntime {
+    const runtime = this.threadRuntimes.get(threadId);
+    if (!runtime) {
+      throw new Error(`Thread ${threadId} is not loaded`);
+    }
+    if (runtime.status !== "ready") {
+      throw new Error(`Thread ${threadId} is not ready`);
+    }
+    return runtime;
   }
 
   private async getThreadEntry(threadId: string): Promise<ThreadRegistryEntry> {

@@ -214,9 +214,30 @@ export type ThreadStatus =
   | { type: "systemError" }
   | { type: "active"; activeFlags: string[] };
 
+export type UserInput =
+  | { type: "text"; text: string; text_elements: JsonValue[] }
+  | { type: "image"; url: string }
+  | { type: "localImage"; path: string }
+  | { type: "skill"; name: string; path: string }
+  | { type: "mention"; name: string; path: string };
+
 export type ThreadItem =
   | { type: "userMessage"; id: string; content: JsonValue[] }
-  | { type: "agentMessage"; id: string; text: string; phase: string | null };
+  | { type: "agentMessage"; id: string; text: string; phase: string | null }
+  | { type: "reasoning"; id: string; summary: string[]; content: string[] }
+  | {
+      type: "commandExecution";
+      id: string;
+      command: string;
+      cwd: string;
+      processId: string | null;
+      status: string;
+      commandActions: JsonValue[];
+      aggregatedOutput: string | null;
+      exitCode: number | null;
+      durationMs: number | null;
+    }
+  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string };
 
 export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
 
@@ -232,6 +253,33 @@ export type Turn = {
   status: TurnStatus;
   error: TurnError | null;
 };
+
+export type TurnStartParams = {
+  threadId: string;
+  input: UserInput[];
+  cwd?: string | null;
+  approvalPolicy?: string | null;
+  approvalsReviewer?: string | null;
+  sandboxPolicy?: JsonValue | null;
+  model?: string | null;
+  serviceTier?: string | null;
+  effort?: string | null;
+  summary?: string | null;
+  personality?: string | null;
+  outputSchema?: JsonValue | null;
+  collaborationMode?: JsonValue | null;
+};
+
+export type TurnStartResponse = {
+  turn: Turn;
+};
+
+export type TurnInterruptParams = {
+  threadId: string;
+  turnId: string;
+};
+
+export type TurnInterruptResponse = Record<string, never>;
 
 export type SessionSource = "appServer";
 
@@ -392,6 +440,56 @@ export type ThreadUnarchiveResponse = { thread: Thread };
 export type ThreadMetadataUpdateResponse = { thread: Thread };
 export type ThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsubscribed";
 export type ThreadUnsubscribeResponse = { status: ThreadUnsubscribeStatus };
+
+export type ThreadTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  cachedOutputTokens: number;
+  totalTokens: number;
+};
+
+export type CommandExecTerminalSize = {
+  cols: number;
+  rows: number;
+};
+
+export type CommandExecParams = {
+  command: string[];
+  processId?: string | null;
+  tty?: boolean;
+  streamStdin?: boolean;
+  streamStdoutStderr?: boolean;
+  outputBytesCap?: number | null;
+  disableOutputCap?: boolean;
+  disableTimeout?: boolean;
+  timeoutMs?: number | null;
+  cwd?: string | null;
+  env?: { [key: string]: string | null | undefined } | null;
+  size?: CommandExecTerminalSize | null;
+  sandboxPolicy?: JsonValue | null;
+};
+
+export type CommandExecResponse = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+};
+
+export type CommandExecWriteParams = {
+  processId: string;
+  deltaBase64?: string | null;
+  closeStdin?: boolean;
+};
+
+export type CommandExecResizeParams = {
+  processId: string;
+  size: CommandExecTerminalSize;
+};
+
+export type CommandExecTerminateParams = {
+  processId: string;
+};
 
 export type ServerNotification = {
   method: string;

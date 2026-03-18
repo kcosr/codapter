@@ -3,65 +3,111 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
-import type { IBackend } from "../src/backend.js";
+import type { BackendEvent, IBackend } from "../src/backend.js";
 import { ThreadRegistry } from "../src/thread-registry.js";
 
-function createBackend(): IBackend {
-  return {
-    async initialize() {},
-    async dispose() {},
-    isAlive() {
-      return true;
-    },
-    async createSession() {
-      return "session_1";
-    },
-    async resumeSession(sessionId) {
-      return sessionId;
-    },
-    async forkSession(sessionId) {
-      return `${sessionId}_fork`;
-    },
-    async disposeSession() {},
-    async readSessionHistory() {
-      return [];
-    },
-    async setSessionName() {},
-    async prompt() {},
-    async abort() {},
-    async listModels() {
-      return [
-        {
-          id: "model_1",
-          model: "gpt-5.4-mini",
-          displayName: "GPT-5.4 Mini",
-          description: "Fast model",
-          hidden: false,
-          isDefault: true,
-          inputModalities: ["text"],
-          supportedReasoningEfforts: ["minimal", "medium"],
-          defaultReasoningEffort: "medium",
-          supportsPersonality: true,
-        },
-      ];
-    },
-    async setModel() {},
-    async getCapabilities() {
-      return {
-        requiresAuth: false,
-        supportsImages: false,
-        supportsThinking: true,
-        supportsParallelTools: false,
-        supportedToolTypes: [],
-      };
-    },
-    async respondToElicitation() {},
-    onEvent() {
-      return {
-        dispose() {},
-      };
-    },
-  };
+class TestBackend implements IBackend {
+  private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  private sessionCounter = 0;
+
+  constructor(
+    private readonly onPromptCallback?: (args: {
+      sessionId: string;
+      turnId: string;
+      text: string;
+    }) => void | Promise<void>
+  ) {}
+
+  async initialize() {}
+  async dispose() {}
+
+  isAlive() {
+    return true;
+  }
+
+  async createSession() {
+    this.sessionCounter += 1;
+    return `session_${this.sessionCounter}`;
+  }
+
+  async resumeSession(sessionId: string) {
+    return sessionId;
+  }
+
+  async forkSession(sessionId: string) {
+    this.sessionCounter += 1;
+    return `${sessionId}_fork_${this.sessionCounter}`;
+  }
+
+  async disposeSession() {}
+  async readSessionHistory() {
+    return [];
+  }
+  async setSessionName() {}
+
+  async prompt(sessionId: string, turnId: string, text: string) {
+    await this.onPromptCallback?.({ sessionId, turnId, text });
+  }
+
+  async abort(sessionId: string) {
+    this.emit(sessionId, {
+      type: "message_end",
+      sessionId,
+      turnId: "ignored",
+    });
+  }
+
+  async listModels() {
+    return [
+      {
+        id: "model_1",
+        model: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        description: "Fast model",
+        hidden: false,
+        isDefault: true,
+        inputModalities: ["text"],
+        supportedReasoningEfforts: ["minimal", "medium"],
+        defaultReasoningEffort: "medium",
+        supportsPersonality: true,
+      },
+    ];
+  }
+
+  async setModel() {}
+
+  async getCapabilities() {
+    return {
+      requiresAuth: false,
+      supportsImages: false,
+      supportsThinking: true,
+      supportsParallelTools: false,
+      supportedToolTypes: [],
+    };
+  }
+
+  async respondToElicitation() {}
+
+  onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
+    const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
+    listeners.add(listener);
+    this.listeners.set(sessionId, listeners);
+    return {
+      dispose: () => {
+        listeners.delete(listener);
+      },
+    };
+  }
+
+  emit(sessionId: string, event: BackendEvent) {
+    for (const listener of this.listeners.get(sessionId) ?? []) {
+      listener(event);
+    }
+  }
+}
+
+function createBackend(onPromptCallback?: ConstructorParameters<typeof TestBackend>[0]): IBackend {
+  return new TestBackend(onPromptCallback);
 }
 
 describe("AppServerConnection", () => {
@@ -341,5 +387,195 @@ describe("AppServerConnection", () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("streams a full turn lifecycle", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "thinking_delta",
+          sessionId,
+          turnId,
+          delta: "thinking",
+        });
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "hello",
+        });
+        backend.emit(sessionId, {
+          type: "tool_start",
+          sessionId,
+          turnId,
+          toolCallId: "tool_1",
+          toolName: "bash",
+          input: { command: ["echo", "ok"] },
+        });
+        backend.emit(sessionId, {
+          type: "tool_update",
+          sessionId,
+          turnId,
+          toolCallId: "tool_1",
+          toolName: "bash",
+          output: { content: [{ type: "text", text: "ok" }] },
+          isCumulative: true,
+        });
+        backend.emit(sessionId, {
+          type: "tool_end",
+          sessionId,
+          turnId,
+          toolCallId: "tool_1",
+          toolName: "bash",
+          output: { content: [{ type: "text", text: "ok" }] },
+          isError: false,
+        });
+        backend.emit(sessionId, {
+          type: "token_usage",
+          sessionId,
+          turnId,
+          usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onNotification(notification) {
+        notifications.push(notification);
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      const response = await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      expect(response).toMatchObject({
+        id: 3,
+        result: {
+          turn: {
+            id: expect.any(String),
+            status: "inProgress",
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const methods = notifications.map((notification) => notification.method);
+      expect(methods).toContain("turn/started");
+      expect(methods).toContain("item/reasoning/textDelta");
+      expect(methods).toContain("item/agentMessage/delta");
+      expect(methods).toContain("item/commandExecution/outputDelta");
+      expect(methods).toContain("thread/tokenUsage/updated");
+      expect(methods).toContain("turn/completed");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("supports buffered and streaming command execution", async () => {
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const connection = new AppServerConnection({
+      onNotification(notification) {
+        notifications.push(notification);
+      },
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const buffered = await connection.handleMessage({
+      id: 2,
+      method: "command/exec",
+      params: {
+        command: ["bash", "-lc", "printf hello"],
+      },
+    });
+    expect(buffered).toEqual({
+      id: 2,
+      result: {
+        exitCode: 0,
+        stdout: "hello",
+        stderr: "",
+      },
+    });
+
+    const streamingPromise = connection.handleMessage({
+      id: 3,
+      method: "command/exec",
+      params: {
+        command: ["bash", "-lc", 'read line; printf "reply:%s" "$line"'],
+        processId: "proc_1",
+        streamStdin: true,
+        streamStdoutStderr: true,
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await connection.handleMessage({
+      id: 4,
+      method: "command/exec/write",
+      params: {
+        processId: "proc_1",
+        deltaBase64: Buffer.from("world\n", "utf8").toString("base64"),
+        closeStdin: true,
+      },
+    });
+
+    const streaming = await streamingPromise;
+    expect(streaming).toEqual({
+      id: 3,
+      result: {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+      },
+    });
+    expect(
+      notifications.some((notification) => notification.method === "command/exec/outputDelta")
+    ).toBe(true);
   });
 });

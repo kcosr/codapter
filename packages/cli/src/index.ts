@@ -232,6 +232,7 @@ async function runStdioAppServer(
     }
   } finally {
     readline.close();
+    await connection.dispose();
   }
 }
 
@@ -341,6 +342,10 @@ function createRpcServer(options: ListenerOptions): {
           socket.send(JSON.stringify(failure(null, -32700, "Parse error")));
         }
       });
+    });
+
+    socket.on("close", () => {
+      void connection.dispose();
     });
   });
 
