@@ -813,6 +813,13 @@ export class PiProcessSession {
   private emitTokenUsage(turnId: string): void {
     void this.getSessionStats()
       .then((usage) => {
+        this.logWriter?.write({
+          at: new Date().toISOString(),
+          component: "pi-process",
+          kind: "parsed-event",
+          eventType: "token_usage",
+          raw: JSON.stringify({ turnId, usage }),
+        });
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId,
@@ -821,6 +828,17 @@ export class PiProcessSession {
         });
       })
       .catch(() => {
+        this.logWriter?.write({
+          at: new Date().toISOString(),
+          component: "pi-process",
+          kind: "parsed-event",
+          eventType: "token_usage",
+          raw: JSON.stringify({
+            turnId,
+            usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            fallback: true,
+          }),
+        });
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId,
