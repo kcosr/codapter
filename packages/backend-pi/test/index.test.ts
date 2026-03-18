@@ -57,7 +57,22 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "",
     "function emitPromptTurn(message) {",
     "  const turnId = ++promptCounter;",
-    "  const assistantMessage = {",
+    "  const assistantToolMessage = {",
+    "    id: 'assistant-tool-' + turnId,",
+    "    role: 'assistant',",
+    "    content: [{ type: 'toolCall', id: 'tool-' + turnId, name: 'bash', arguments: { command: 'echo hi' } }],",
+    "    timestamp: Date.now(),",
+    "  };",
+    "  const toolResultMessage = {",
+    "    id: 'tool-result-' + turnId,",
+    "    role: 'toolResult',",
+    "    toolCallId: 'tool-' + turnId,",
+    "    toolName: 'bash',",
+    "    content: [{ type: 'text', text: 'hi' }],",
+    "    isError: false,",
+    "    timestamp: Date.now(),",
+    "  };",
+    "  const assistantFinalMessage = {",
     "    id: 'assistant-' + turnId,",
     "    role: 'assistant',",
     "    content: [{ type: 'text', text: 'response-' + turnId }],",
@@ -78,7 +93,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    write({ type: 'message_end', message: userMessage });",
     "    write({",
     "      type: 'message_update',",
-    "      message: assistantMessage,",
+    "      message: assistantFinalMessage,",
     "      assistantMessageEvent: { type: 'text_delta', delta: 'hello from pi' },",
     "    });",
     "    write({",
@@ -108,9 +123,11 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "      title: 'Confirm',",
     "      message: 'Proceed?',",
     "    });",
-    "    write({ type: 'message_end', message: assistantMessage });",
-    "    write({ type: 'turn_end', message: assistantMessage, toolResults: [] });",
-    "    state.history.push(assistantMessage);",
+    "    write({ type: 'message_end', message: assistantFinalMessage });",
+    "    write({ type: 'turn_end', message: assistantFinalMessage, toolResults: [] });",
+    "    state.history.push(assistantToolMessage);",
+    "    state.history.push(toolResultMessage);",
+    "    state.history.push(assistantFinalMessage);",
     "    state.tokens = { input: 5, output: 7, cacheRead: 0, cacheWrite: 0, total: 12 };",
     "  }, 15);",
     "}",
@@ -359,6 +376,17 @@ describe("PiBackend", () => {
     const history = await backend.readSessionHistory(sessionId);
     expect(history.some((message) => message.role === "user")).toBe(true);
     expect(history.some((message) => message.role === "assistant")).toBe(true);
+    expect(history).toContainEqual(
+      expect.objectContaining({
+        role: "toolResult",
+        content: expect.objectContaining({
+          toolCallId: "tool-1",
+          toolName: "bash",
+          isError: false,
+          content: [{ type: "text", text: "hi" }],
+        }),
+      })
+    );
     expect(history.some((message) => message.role === "system")).toBe(true);
 
     const forkedSessionId = await backend.forkSession(sessionId);

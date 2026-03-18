@@ -36,6 +36,7 @@ describe("ThreadRegistry", () => {
     expect(await registry.get(created.threadId)).toMatchObject({
       backendSessionId: "session_1",
       backendType: "pi",
+      hidden: false,
       cwd: "/repo",
       preview: "hello",
       archived: false,
@@ -111,6 +112,7 @@ describe("ThreadRegistry", () => {
     expect(await registry.list()).toHaveLength(1);
     expect(await registry.get("thread_valid")).toMatchObject({
       backendSessionId: "session_valid",
+      hidden: false,
     });
     expect(warn).toHaveBeenCalledOnce();
   });

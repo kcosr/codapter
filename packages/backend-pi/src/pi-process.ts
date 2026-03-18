@@ -261,11 +261,13 @@ function mapMessage(message: unknown, index: number): BackendMessage {
           : `message-${index}`,
     role: typeof record.role === "string" ? record.role : "unknown",
     content:
-      typeof record.content === "string" ||
-      Array.isArray(record.content) ||
-      isRecord(record.content)
-        ? structuredClone(record.content)
-        : structuredClone(record),
+      record.role === "toolResult"
+        ? structuredClone(record)
+        : typeof record.content === "string" ||
+            Array.isArray(record.content) ||
+            isRecord(record.content)
+          ? structuredClone(record.content)
+          : structuredClone(record),
     createdAt: timestamp,
   };
 }

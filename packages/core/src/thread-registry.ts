@@ -12,6 +12,7 @@ export interface ThreadRegistryEntry {
   readonly threadId: string;
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly hidden: boolean;
   readonly name: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -25,6 +26,7 @@ export interface ThreadRegistryEntry {
 export interface CreateThreadRegistryEntry {
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly hidden?: boolean;
   readonly name?: string | null;
   readonly archived?: boolean;
   readonly cwd?: string | null;
@@ -36,6 +38,7 @@ export interface CreateThreadRegistryEntry {
 export interface UpdateThreadRegistryEntry {
   readonly backendSessionId?: string;
   readonly backendType?: string;
+  readonly hidden?: boolean;
   readonly name?: string | null;
   readonly updatedAt?: string;
   readonly archived?: boolean;
@@ -78,6 +81,7 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     typeof value.threadId === "string" &&
     typeof value.backendSessionId === "string" &&
     typeof value.backendType === "string" &&
+    (typeof value.hidden === "boolean" || value.hidden === undefined) &&
     (typeof value.name === "string" || value.name === null) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
@@ -147,7 +151,10 @@ export class ThreadRegistry {
         });
         continue;
       }
-      this.entries.set(entry.threadId, entry);
+      this.entries.set(entry.threadId, {
+        ...entry,
+        hidden: entry.hidden ?? false,
+      });
     }
 
     this.loaded = true;
@@ -173,6 +180,7 @@ export class ThreadRegistry {
       threadId: randomUUID(),
       backendSessionId: input.backendSessionId,
       backendType: input.backendType,
+      hidden: input.hidden ?? false,
       name: input.name ?? null,
       createdAt: now,
       updatedAt: now,

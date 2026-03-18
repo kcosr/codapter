@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
-import type { BackendEvent, IBackend } from "../src/backend.js";
+import type { BackendEvent, BackendMessage, IBackend } from "../src/backend.js";
 import { ThreadRegistry } from "../src/thread-registry.js";
 
 class TestBackend implements IBackend {
   private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
   private readonly activeTurns = new Map<string, string>();
   private sessionCounter = 0;
+  public readonly sessionHistories = new Map<string, BackendMessage[]>();
   public readonly elicitationResponses: Array<{
     sessionId: string;
     requestId: string;
@@ -46,8 +47,8 @@ class TestBackend implements IBackend {
   }
 
   async disposeSession() {}
-  async readSessionHistory() {
-    return [];
+  async readSessionHistory(sessionId: string) {
+    return this.sessionHistories.get(sessionId) ?? [];
   }
   async setSessionName() {}
 
@@ -653,6 +654,192 @@ describe("AppServerConnection", () => {
               cachedOutputTokens: 4,
               totalTokens: 10,
             },
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("hides internal title-generator threads from thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [
+            {
+              type: "text",
+              text: "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task.\nGenerate a concise UI title.\nUser prompt: hi",
+              text_elements: [],
+            },
+          ],
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 4,
+          method: "thread/list",
+          params: {},
+        })
+      ).resolves.toEqual({
+        id: 4,
+        result: {
+          data: [],
+          nextCursor: null,
+        },
+      });
+
+      expect(await threadRegistry.get(started.result.thread.id)).toMatchObject({
+        hidden: true,
+        preview: null,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reconstructs structured history for resumed threads", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend();
+    const entry = await threadRegistry.create({
+      backendSessionId: "session_1",
+      backendType: "pi",
+      cwd: "/repo",
+      preview: "run pwd",
+      modelProvider: "pi",
+      gitInfo: null,
+    });
+    backend.sessionHistories.set("session_1", [
+      {
+        id: "user-1",
+        role: "user",
+        content: [{ type: "text", text: "run pwd" }],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "**Identifying need for bash command execution**",
+          },
+          {
+            type: "toolCall",
+            id: "tool-1",
+            name: "bash",
+            arguments: { command: "pwd" },
+          },
+        ],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        content: {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "bash",
+          content: [{ type: "text", text: "/home/kevin\n" }],
+          isError: false,
+        },
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: [{ type: "text", text: "`pwd` -> `/home/kevin`" }],
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const resumed = await connection.handleMessage({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: entry.threadId,
+          persistExtendedHistory: false,
+        },
+      });
+
+      expect(resumed).toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            id: entry.threadId,
+            turns: [
+              {
+                status: "completed",
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "run pwd" }],
+                  },
+                  {
+                    type: "reasoning",
+                    summary: ["**Identifying need for bash command execution**"],
+                  },
+                  {
+                    type: "commandExecution",
+                    command: "pwd",
+                    cwd: "/repo",
+                    status: "completed",
+                    aggregatedOutput: "/home/kevin\n",
+                    exitCode: 0,
+                  },
+                  {
+                    type: "agentMessage",
+                    text: "`pwd` -> `/home/kevin`",
+                  },
+                ],
+              },
+            ],
           },
         },
       });

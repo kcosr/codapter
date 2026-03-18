@@ -43,6 +43,7 @@ import type {
   GitInfo,
   InitializeParams,
   InitializeResponse,
+  JsonValue,
   McpServerStatusListResponse,
   ModelListResponse,
   PluginListResponse,
@@ -99,6 +100,9 @@ const DEFAULT_APPROVAL_POLICY = "never";
 const DEFAULT_APPROVALS_REVIEWER = "user";
 const DEFAULT_SANDBOX = { mode: "workspace-write" } as const;
 const DEFAULT_MODEL_PROVIDER = "pi";
+const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
+  "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
+const INTERNAL_TITLE_THREAD_PROMPT_MARKER = "Generate a concise UI title";
 
 export interface AppServerIdentity {
   readonly userAgent: string;
@@ -281,29 +285,319 @@ function textFromUnknown(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function buildTurns(history: readonly BackendMessage[]): Turn[] {
-  return history.map((message) => {
-    const item: ThreadItem =
-      message.role === "user"
-        ? {
-            type: "userMessage",
-            id: `${message.id}_item`,
-            content: [textFromUnknown(message.content)],
-          }
-        : {
-            type: "agentMessage",
-            id: `${message.id}_item`,
-            text: textFromUnknown(message.content),
-            phase: null,
-          };
+function isInternalTitlePrompt(text: string): boolean {
+  const normalized = text.trim();
+  return (
+    normalized.startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) &&
+    normalized.includes(INTERNAL_TITLE_THREAD_PROMPT_MARKER)
+  );
+}
 
-    return {
-      id: message.id,
-      items: [item],
+function isInternalTitlePreview(preview: string | null): boolean {
+  return preview?.trim().startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ?? false;
+}
+
+function toJsonValueArray(value: unknown): JsonValue[] {
+  if (Array.isArray(value)) {
+    return structuredClone(value) as JsonValue[];
+  }
+  const text = textFromUnknown(value);
+  if (!text) {
+    return [];
+  }
+  return [{ type: "text", text }];
+}
+
+function commandFromToolArguments(input: unknown): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (!isRecord(input)) {
+    return "";
+  }
+  const command = input.command;
+  if (typeof command === "string") {
+    return command;
+  }
+  if (Array.isArray(command)) {
+    return command.filter((value): value is string => typeof value === "string").join(" ");
+  }
+  return "";
+}
+
+function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
+  if (/bash|shell|command/i.test(toolName)) {
+    return "commandExecution";
+  }
+  if (/edit|write|patch|file/i.test(toolName)) {
+    return "fileChange";
+  }
+  return "agentMessage";
+}
+
+function thinkingSummaryFromSignature(signature: string): string | null {
+  try {
+    const parsed = JSON.parse(signature);
+    if (!isRecord(parsed) || !Array.isArray(parsed.summary)) {
+      return null;
+    }
+    const summary = parsed.summary
+      .flatMap((entry) => {
+        if (!isRecord(entry) || typeof entry.text !== "string") {
+          return [];
+        }
+        return [entry.text];
+      })
+      .join("")
+      .trim();
+    return summary.length > 0 ? summary : null;
+  } catch {
+    return null;
+  }
+}
+
+function thinkingSummaryFromContent(content: unknown): string | null {
+  if (!isRecord(content)) {
+    return null;
+  }
+  if (typeof content.thinkingSignature === "string") {
+    const summary = thinkingSummaryFromSignature(content.thinkingSignature);
+    if (summary) {
+      return summary;
+    }
+  }
+  if (typeof content.thinking === "string" && content.thinking.trim().length > 0) {
+    return content.thinking;
+  }
+  return null;
+}
+
+function textContentFromBlocks(blocks: readonly JsonValue[]): string {
+  return blocks
+    .map((block) => {
+      if (!isRecord(block)) {
+        return textFromUnknown(block);
+      }
+      if (block.type === "text" && typeof block.text === "string") {
+        return block.text;
+      }
+      return textFromUnknown(block);
+    })
+    .join("");
+}
+
+function finalizeHistoricalToolItem(item: ThreadItem): void {
+  if (item.type === "commandExecution" && item.status === "inProgress") {
+    item.status = "completed";
+    item.exitCode = item.exitCode ?? 0;
+    item.durationMs = item.durationMs ?? 0;
+  }
+  if (item.type === "fileChange" && item.status === "inProgress") {
+    item.status = "completed";
+  }
+}
+
+function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
+  const turns: Turn[] = [];
+  let currentTurn: Turn | null = null;
+  let pendingTools = new Map<string, ThreadItem>();
+
+  const ensureTurn = (id: string) => {
+    if (currentTurn) {
+      return currentTurn;
+    }
+    currentTurn = {
+      id,
+      items: [],
       status: "completed",
       error: null,
     };
-  });
+    turns.push(currentTurn);
+    pendingTools = new Map<string, ThreadItem>();
+    return currentTurn;
+  };
+
+  const finalizeTurn = () => {
+    for (const item of pendingTools.values()) {
+      finalizeHistoricalToolItem(item);
+    }
+    currentTurn = null;
+    pendingTools = new Map<string, ThreadItem>();
+  };
+
+  for (const message of history) {
+    if (message.role === "user") {
+      finalizeTurn();
+      const turn = ensureTurn(message.id);
+      turn.items.push({
+        type: "userMessage",
+        id: `${message.id}_item`,
+        content: toJsonValueArray(message.content),
+      });
+      continue;
+    }
+
+    const turn = ensureTurn(message.id);
+    if (message.role === "assistant") {
+      const content = toJsonValueArray(message.content);
+      for (const [index, block] of content.entries()) {
+        if (!isRecord(block)) {
+          const text = textFromUnknown(block);
+          if (text) {
+            turn.items.push({
+              type: "agentMessage",
+              id: `${message.id}_item_${index}`,
+              text,
+              phase: null,
+            });
+          }
+          continue;
+        }
+
+        if (block.type === "thinking") {
+          const summary = thinkingSummaryFromContent(block);
+          if (summary) {
+            turn.items.push({
+              type: "reasoning",
+              id: `${message.id}_reasoning_${index}`,
+              summary: [summary],
+              content: [],
+            });
+          }
+          continue;
+        }
+
+        if (block.type === "toolCall") {
+          const toolName = typeof block.name === "string" ? block.name : "tool";
+          const toolCallId =
+            typeof block.id === "string" && block.id.length > 0
+              ? block.id
+              : `${message.id}_tool_${index}`;
+          const toolKind = toolKindFromName(toolName);
+          const item: ThreadItem =
+            toolKind === "commandExecution"
+              ? {
+                  type: "commandExecution",
+                  id: `${message.id}_tool_${index}`,
+                  command: commandFromToolArguments(block.arguments),
+                  cwd,
+                  processId: null,
+                  status: "inProgress",
+                  commandActions: [],
+                  aggregatedOutput: null,
+                  exitCode: null,
+                  durationMs: null,
+                }
+              : toolKind === "fileChange"
+                ? {
+                    type: "fileChange",
+                    id: `${message.id}_tool_${index}`,
+                    changes: [],
+                    status: "inProgress",
+                  }
+                : {
+                    type: "agentMessage",
+                    id: `${message.id}_tool_${index}`,
+                    text: "",
+                    phase: null,
+                  };
+          turn.items.push(item);
+          pendingTools.set(toolCallId, item);
+          continue;
+        }
+
+        const text =
+          block.type === "text" && typeof block.text === "string"
+            ? block.text
+            : textFromUnknown(block);
+        if (text) {
+          turn.items.push({
+            type: "agentMessage",
+            id: `${message.id}_item_${index}`,
+            text,
+            phase: null,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (message.role === "toolResult") {
+      const record = isRecord(message.content) ? message.content : {};
+      const toolCallId =
+        typeof record.toolCallId === "string" ? record.toolCallId : `${message.id}_toolResult`;
+      const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+      const blocks = toJsonValueArray(record.content);
+      const outputText = textContentFromBlocks(blocks);
+      const isError = Boolean(record.isError);
+      const existingItem = pendingTools.get(toolCallId);
+      if (existingItem) {
+        if (existingItem.type === "commandExecution") {
+          existingItem.aggregatedOutput = outputText || existingItem.aggregatedOutput;
+          existingItem.status = isError ? "failed" : "completed";
+          existingItem.exitCode = isError ? 1 : 0;
+          existingItem.durationMs = existingItem.durationMs ?? 0;
+        } else if (existingItem.type === "fileChange") {
+          existingItem.changes = blocks;
+          existingItem.status = isError ? "failed" : "completed";
+        } else if (existingItem.type === "agentMessage") {
+          existingItem.text = outputText;
+        }
+        pendingTools.delete(toolCallId);
+        continue;
+      }
+
+      const toolKind = toolKindFromName(toolName);
+      if (toolKind === "commandExecution") {
+        turn.items.push({
+          type: "commandExecution",
+          id: `${message.id}_toolResult`,
+          command: "",
+          cwd,
+          processId: null,
+          status: isError ? "failed" : "completed",
+          commandActions: [],
+          aggregatedOutput: outputText || null,
+          exitCode: isError ? 1 : 0,
+          durationMs: 0,
+        });
+        continue;
+      }
+
+      if (toolKind === "fileChange") {
+        turn.items.push({
+          type: "fileChange",
+          id: `${message.id}_toolResult`,
+          changes: blocks,
+          status: isError ? "failed" : "completed",
+        });
+        continue;
+      }
+
+      if (outputText) {
+        turn.items.push({
+          type: "agentMessage",
+          id: `${message.id}_toolResult`,
+          text: outputText,
+          phase: null,
+        });
+      }
+      continue;
+    }
+
+    const text = textFromUnknown(message.content);
+    if (text) {
+      turn.items.push({
+        type: "agentMessage",
+        id: `${message.id}_item`,
+        text,
+        phase: null,
+      });
+    }
+  }
+
+  finalizeTurn();
+  return turns;
 }
 
 function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
@@ -937,7 +1231,7 @@ export class AppServerConnection {
       subscription: null,
     });
     const history = await backend.readSessionHistory(sessionId);
-    const thread = this.buildThread(entry, buildTurns(history));
+    const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
@@ -973,7 +1267,7 @@ export class AppServerConnection {
       subscription: null,
     });
     const history = await backend.readSessionHistory(sessionId);
-    const thread = this.buildThread(entry, buildTurns(history));
+    const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
     await this.publish("thread/started", { thread }, entry.threadId);
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
@@ -989,7 +1283,10 @@ export class AppServerConnection {
     const runtime = this.threadRuntimes.get(parsed.threadId);
     const turns =
       parsed.includeTurns && this.backend
-        ? buildTurns(await this.backend.readSessionHistory(entry.backendSessionId))
+        ? buildTurns(
+            await this.backend.readSessionHistory(entry.backendSessionId),
+            entry.cwd ?? process.cwd()
+          )
         : [];
     if (runtime?.machine && parsed.includeTurns) {
       turns.push(runtime.machine.snapshot);
@@ -1001,7 +1298,22 @@ export class AppServerConnection {
     const parsed = (params ?? {}) as Partial<ThreadListParams>;
     const cursor = Number(parsed.cursor ?? "0");
     const limit = parsed.limit ?? 50;
-    const entries = (await this.threadRegistry.list())
+    const entries = [];
+    for (const entry of await this.threadRegistry.list()) {
+      if (!entry.hidden && isInternalTitlePreview(entry.preview)) {
+        entries.push(
+          await this.threadRegistry.update(entry.threadId, {
+            hidden: true,
+            preview: null,
+          })
+        );
+        continue;
+      }
+      entries.push(entry);
+    }
+
+    const visibleEntries = entries
+      .filter((entry) => !entry.hidden)
       .filter((entry) => {
         if (parsed.archived !== null && parsed.archived !== undefined) {
           return entry.archived === parsed.archived;
@@ -1028,10 +1340,10 @@ export class AppServerConnection {
       );
 
     const start = Number.isFinite(cursor) && cursor >= 0 ? cursor : 0;
-    const slice = entries.slice(start, start + limit);
+    const slice = visibleEntries.slice(start, start + limit);
     return {
       data: slice.map((entry) => this.buildThread(entry, [])),
-      nextCursor: start + limit < entries.length ? String(start + limit) : null,
+      nextCursor: start + limit < visibleEntries.length ? String(start + limit) : null,
     };
   }
 
@@ -1104,17 +1416,30 @@ export class AppServerConnection {
   private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnStartParams;
-    const entry = await this.getThreadEntry(parsed.threadId);
+    let entry = await this.getThreadEntry(parsed.threadId);
     const runtime = this.getReadyThreadRuntime(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
     if (parsed.model) {
       await backend.setModel(runtime.sessionId, parsed.model);
     }
+    const threadPatch: {
+      hidden?: boolean;
+      preview?: string | null;
+      cwd?: string | null;
+    } = {};
     if (!entry.preview && preview) {
-      await this.threadRegistry.update(parsed.threadId, { preview });
+      if (isInternalTitlePrompt(text)) {
+        threadPatch.hidden = true;
+        threadPatch.preview = null;
+      } else {
+        threadPatch.preview = preview;
+      }
     }
     if (parsed.cwd) {
-      await this.threadRegistry.update(parsed.threadId, { cwd: parsed.cwd });
+      threadPatch.cwd = parsed.cwd;
+    }
+    if (Object.keys(threadPatch).length > 0) {
+      entry = await this.threadRegistry.update(parsed.threadId, threadPatch);
     }
 
     const turnId = randomUUID();
