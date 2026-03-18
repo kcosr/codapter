@@ -29,6 +29,7 @@ export interface JsonRpcErrorResponse {
 
 export type JsonRpcResponse = JsonRpcSuccessResponse | JsonRpcErrorResponse;
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification;
+export type JsonRpcEnvelope = JsonRpcMessage | JsonRpcResponse;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -44,6 +45,29 @@ export function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
 
 export function isJsonRpcNotification(value: unknown): value is JsonRpcNotification {
   return isRecord(value) && typeof value.method === "string" && value.id === undefined;
+}
+
+export function isJsonRpcSuccessResponse(value: unknown): value is JsonRpcSuccessResponse {
+  return (
+    isRecord(value) &&
+    (typeof value.id === "string" || typeof value.id === "number") &&
+    value.result !== undefined &&
+    value.error === undefined
+  );
+}
+
+export function isJsonRpcErrorResponse(value: unknown): value is JsonRpcErrorResponse {
+  return (
+    isRecord(value) &&
+    (typeof value.id === "string" || typeof value.id === "number" || value.id === null) &&
+    isRecord(value.error) &&
+    typeof value.error.code === "number" &&
+    typeof value.error.message === "string"
+  );
+}
+
+export function isJsonRpcResponse(value: unknown): value is JsonRpcResponse {
+  return isJsonRpcSuccessResponse(value) || isJsonRpcErrorResponse(value);
 }
 
 export function success(id: JsonRpcId, result: unknown): JsonRpcSuccessResponse {

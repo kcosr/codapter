@@ -8,7 +8,13 @@ import { ThreadRegistry } from "../src/thread-registry.js";
 
 class TestBackend implements IBackend {
   private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  private readonly activeTurns = new Map<string, string>();
   private sessionCounter = 0;
+  public readonly elicitationResponses: Array<{
+    sessionId: string;
+    requestId: string;
+    response: unknown;
+  }> = [];
 
   constructor(
     private readonly onPromptCallback?: (args: {
@@ -46,6 +52,7 @@ class TestBackend implements IBackend {
   async setSessionName() {}
 
   async prompt(sessionId: string, turnId: string, text: string) {
+    this.activeTurns.set(sessionId, turnId);
     await this.onPromptCallback?.({ sessionId, turnId, text });
   }
 
@@ -86,7 +93,17 @@ class TestBackend implements IBackend {
     };
   }
 
-  async respondToElicitation() {}
+  async respondToElicitation(sessionId: string, requestId: string, response: unknown) {
+    this.elicitationResponses.push({ sessionId, requestId, response });
+    const turnId = this.activeTurns.get(sessionId);
+    if (turnId) {
+      this.emit(sessionId, {
+        type: "message_end",
+        sessionId,
+        turnId,
+      });
+    }
+  }
 
   onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
     const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
@@ -313,8 +330,8 @@ describe("AppServerConnection", () => {
     const connection = new AppServerConnection({
       backend: createBackend(),
       threadRegistry,
-      onNotification(notification) {
-        notifications.push(notification);
+      onMessage(message) {
+        notifications.push(message);
       },
     });
 
@@ -450,8 +467,8 @@ describe("AppServerConnection", () => {
     const connection = new AppServerConnection({
       backend,
       threadRegistry,
-      onNotification(notification) {
-        notifications.push(notification);
+      onMessage(message) {
+        notifications.push(message);
       },
     });
 
@@ -513,8 +530,8 @@ describe("AppServerConnection", () => {
   it("supports buffered and streaming command execution", async () => {
     const notifications: Array<{ method: string; params?: unknown }> = [];
     const connection = new AppServerConnection({
-      onNotification(notification) {
-        notifications.push(notification);
+      onMessage(message) {
+        notifications.push(message);
       },
     });
 
@@ -577,5 +594,101 @@ describe("AppServerConnection", () => {
     expect(
       notifications.some((notification) => notification.method === "command/exec/outputDelta")
     ).toBe(true);
+  });
+
+  it("round-trips Pi elicitation through item/tool/requestUserInput", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const outgoing: Array<{ id?: string | number; method: string; params?: unknown }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "elicitation_request",
+          sessionId,
+          turnId,
+          requestId: "pi-request-1",
+          payload: {
+            type: "extension_ui_request",
+            id: "pi-request-1",
+            method: "confirm",
+            title: "Confirm",
+            message: "Proceed?",
+          },
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage(message) {
+        if ("method" in message) {
+          outgoing.push(message);
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const request = outgoing.find((message) => message.method === "item/tool/requestUserInput") as
+        | { id: string | number; params: { questions: Array<{ id: string }> } }
+        | undefined;
+      expect(request).toBeDefined();
+
+      const questionId = request?.params.questions[0]?.id;
+      await connection.handleMessage({
+        id: request?.id ?? "missing",
+        result: {
+          answers: {
+            [questionId ?? "confirmed"]: {
+              answers: ["Yes"],
+            },
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(backend.elicitationResponses).toEqual([
+        {
+          sessionId: "session_1",
+          requestId: "pi-request-1",
+          response: { confirmed: true },
+        },
+      ]);
+      expect(outgoing.some((message) => message.method === "serverRequest/resolved")).toBe(true);
+      expect(outgoing.some((message) => message.method === "turn/completed")).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

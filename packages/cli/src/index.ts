@@ -204,8 +204,8 @@ async function runStdioAppServer(
 ): Promise<void> {
   const connection = new AppServerConnection({
     backend,
-    onNotification(notification) {
-      stdout.write(serializeNdjsonLine(notification));
+    onMessage(message) {
+      stdout.write(serializeNdjsonLine(message));
     },
   });
   const readline = createInterface({
@@ -323,8 +323,8 @@ function createRpcServer(options: ListenerOptions): {
   websocketServer.on("connection", (socket: WebSocket) => {
     const connection = new AppServerConnection({
       backend: options.backend,
-      onNotification(notification) {
-        socket.send(JSON.stringify(notification));
+      onMessage(message) {
+        socket.send(JSON.stringify(message));
       },
     });
     let queue = Promise.resolve();

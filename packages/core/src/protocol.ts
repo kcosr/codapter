@@ -491,6 +491,40 @@ export type CommandExecTerminateParams = {
   processId: string;
 };
 
+export type ToolRequestUserInputOption = {
+  label: string;
+  description: string;
+};
+
+export type ToolRequestUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: ToolRequestUserInputOption[] | null;
+};
+
+export type ToolRequestUserInputParams = {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: ToolRequestUserInputQuestion[];
+};
+
+export type ToolRequestUserInputAnswer = {
+  answers: string[];
+};
+
+export type ToolRequestUserInputResponse = {
+  answers: { [key: string]: ToolRequestUserInputAnswer | undefined };
+};
+
+export type ServerRequestResolvedNotification = {
+  threadId: string;
+  requestId: JsonRpcId;
+};
+
 export type ServerNotification = {
   method: string;
   params?: unknown;

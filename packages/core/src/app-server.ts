@@ -12,11 +12,13 @@ import type {
 import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
+  type JsonRpcEnvelope,
   type JsonRpcMessage,
   type JsonRpcResponse,
   failure,
   isJsonRpcNotification,
   isJsonRpcRequest,
+  isJsonRpcResponse,
   success,
 } from "./jsonrpc.js";
 import type {
@@ -65,6 +67,9 @@ import type {
   ThreadUnarchiveResponse,
   ThreadUnsubscribeParams,
   ThreadUnsubscribeResponse,
+  ToolRequestUserInputParams,
+  ToolRequestUserInputQuestion,
+  ToolRequestUserInputResponse,
   Turn,
   TurnInterruptParams,
   TurnInterruptResponse,
@@ -105,13 +110,15 @@ export interface AppServerNotification {
   readonly params?: unknown;
 }
 
+export type AppServerOutgoingMessage = JsonRpcEnvelope;
+
 export interface AppServerConnectionOptions {
   readonly backend?: IBackend;
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
   readonly threadRegistry?: ThreadRegistry;
-  readonly onNotification?: (notification: AppServerNotification) => void | Promise<void>;
+  readonly onMessage?: (message: AppServerOutgoingMessage) => void | Promise<void>;
 }
 
 interface ConnectionState {
@@ -128,6 +135,15 @@ interface ThreadRuntime {
   activeTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
+}
+
+interface PendingToolUserInputRequest {
+  threadId: string;
+  turnId: string;
+  sessionId: string;
+  backendRequestId: string;
+  resolve(response: ToolRequestUserInputResponse): void;
+  reject(error: unknown): void;
 }
 
 function detectPlatformFamily(): string {
@@ -249,17 +265,159 @@ function turnErrorFromUnknown(error: unknown) {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toQuestionOptions(options: unknown): ToolRequestUserInputQuestion["options"] {
+  if (!Array.isArray(options)) {
+    return null;
+  }
+
+  return options
+    .filter((value): value is string => typeof value === "string")
+    .map((label) => ({
+      label,
+      description: label,
+    }));
+}
+
+function buildToolRequestUserInput(
+  threadId: string,
+  turnId: string,
+  itemId: string,
+  payload: unknown
+): ToolRequestUserInputParams | null {
+  if (!isRecord(payload) || typeof payload.method !== "string") {
+    return null;
+  }
+
+  const header = typeof payload.title === "string" ? payload.title : "Input required";
+  switch (payload.method) {
+    case "select":
+      return {
+        threadId,
+        turnId,
+        itemId,
+        questions: [
+          {
+            id: "value",
+            header,
+            question: header,
+            isOther: false,
+            isSecret: false,
+            options: toQuestionOptions(payload.options),
+          },
+        ],
+      };
+    case "confirm":
+      return {
+        threadId,
+        turnId,
+        itemId,
+        questions: [
+          {
+            id: "confirmed",
+            header,
+            question: typeof payload.message === "string" ? payload.message : header,
+            isOther: false,
+            isSecret: false,
+            options: [
+              { label: "Yes", description: "Approve this request." },
+              { label: "No", description: "Decline this request." },
+            ],
+          },
+        ],
+      };
+    case "input":
+      return {
+        threadId,
+        turnId,
+        itemId,
+        questions: [
+          {
+            id: "value",
+            header,
+            question: typeof payload.placeholder === "string" ? payload.placeholder : header,
+            isOther: true,
+            isSecret: false,
+            options: null,
+          },
+        ],
+      };
+    case "editor":
+      return {
+        threadId,
+        turnId,
+        itemId,
+        questions: [
+          {
+            id: "value",
+            header,
+            question: header,
+            isOther: true,
+            isSecret: false,
+            options: null,
+          },
+        ],
+      };
+    default:
+      return null;
+  }
+}
+
+function firstAnswer(
+  response: ToolRequestUserInputResponse,
+  questionId: string
+): string | undefined {
+  return response.answers[questionId]?.answers[0];
+}
+
+function mapToolRequestUserInputResponse(
+  payload: unknown,
+  response: ToolRequestUserInputResponse
+): unknown {
+  if (!isRecord(payload) || typeof payload.method !== "string") {
+    return { cancelled: true as const };
+  }
+
+  switch (payload.method) {
+    case "select": {
+      const value = firstAnswer(response, "value");
+      return value ? { value } : { cancelled: true as const };
+    }
+    case "confirm": {
+      const value = firstAnswer(response, "confirmed");
+      if (!value) {
+        return { cancelled: true as const };
+      }
+      return { confirmed: /^y(es)?$/i.test(value) || /^true$/i.test(value) };
+    }
+    case "input":
+    case "editor": {
+      const value = firstAnswer(response, "value");
+      return value !== undefined ? { value } : { cancelled: true as const };
+    }
+    default:
+      return { cancelled: true as const };
+  }
+}
+
 export class AppServerConnection {
   private readonly backend: IBackend | undefined;
   private readonly configStore: InMemoryConfigStore;
   private readonly identity: AppServerIdentity;
   private readonly logger: AppServerLogger;
   private readonly threadRegistry: ThreadRegistry;
-  private readonly onNotification:
-    | ((notification: AppServerNotification) => void | Promise<void>)
+  private readonly onMessage:
+    | ((message: AppServerOutgoingMessage) => void | Promise<void>)
     | undefined;
   private readonly commandExecManager: CommandExecManager;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
+  private readonly pendingToolUserInputRequests = new Map<
+    string | number,
+    PendingToolUserInputRequest
+  >();
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
@@ -275,7 +433,7 @@ export class AppServerConnection {
     this.logger = options.logger ?? defaultLogger();
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
-    this.onNotification = options.onNotification;
+    this.onMessage = options.onMessage;
     this.commandExecManager = new CommandExecManager({
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
@@ -287,11 +445,19 @@ export class AppServerConnection {
     for (const runtime of this.threadRuntimes.values()) {
       runtime.subscription?.dispose();
     }
+    for (const request of this.pendingToolUserInputRequests.values()) {
+      request.reject(new Error("Connection closed before server request resolved"));
+    }
+    this.pendingToolUserInputRequests.clear();
     this.threadRuntimes.clear();
     await this.commandExecManager.dispose();
   }
 
   async handleMessage(message: unknown): Promise<JsonRpcResponse | null> {
+    if (isJsonRpcResponse(message)) {
+      return this.handleResponse(message);
+    }
+
     if (isJsonRpcNotification(message)) {
       return this.handleNotification(message);
     }
@@ -385,6 +551,26 @@ export class AppServerConnection {
     }
   }
 
+  private handleResponse(message: JsonRpcResponse): null {
+    if (message.id === null) {
+      return null;
+    }
+
+    const pending = this.pendingToolUserInputRequests.get(message.id);
+    if (!pending) {
+      return null;
+    }
+
+    this.pendingToolUserInputRequests.delete(message.id);
+    if ("error" in message) {
+      pending.reject(message.error);
+      return null;
+    }
+
+    pending.resolve(message.result as ToolRequestUserInputResponse);
+    return null;
+  }
+
   emitNotification(method: string, params?: unknown): AppServerNotification | null {
     if (this.state.optedOutNotifications.has(method)) {
       return null;
@@ -402,7 +588,7 @@ export class AppServerConnection {
   }
 
   private async publish(method: string, params?: unknown, threadId?: string): Promise<void> {
-    if (!this.onNotification) {
+    if (!this.onMessage) {
       return;
     }
 
@@ -412,8 +598,12 @@ export class AppServerConnection {
 
     const notification = this.emitNotification(method, params);
     if (notification) {
-      await this.onNotification(notification);
+      await this.send(notification);
     }
+  }
+
+  private async send(message: AppServerOutgoingMessage): Promise<void> {
+    await this.onMessage?.(message);
   }
 
   private handleNotification(message: JsonRpcMessage): null {
@@ -906,10 +1096,71 @@ export class AppServerConnection {
       return;
     }
 
+    if (event.type === "elicitation_request") {
+      await this.handleToolUserInputRequest(
+        threadId,
+        turnId,
+        runtime.sessionId,
+        event.requestId,
+        event.payload
+      );
+      return;
+    }
+
     const completedTurn = await runtime.machine.handleEvent(event);
     if (completedTurn) {
       await this.finishTurn(threadId, turnId);
     }
+  }
+
+  private async handleToolUserInputRequest(
+    threadId: string,
+    turnId: string,
+    sessionId: string,
+    backendRequestId: string,
+    payload: unknown
+  ): Promise<void> {
+    const runtime = this.threadRuntimes.get(threadId);
+    const itemId = runtime?.machine?.snapshot.items.at(-1)?.id ?? backendRequestId;
+    const params = buildToolRequestUserInput(threadId, turnId, itemId, payload);
+    if (!params) {
+      return;
+    }
+
+    const requestId = randomUUID();
+    const response = await new Promise<ToolRequestUserInputResponse>((resolve, reject) => {
+      this.pendingToolUserInputRequests.set(requestId, {
+        threadId,
+        turnId,
+        sessionId,
+        backendRequestId,
+        resolve,
+        reject,
+      });
+
+      void this.send({
+        id: requestId,
+        method: "item/tool/requestUserInput",
+        params,
+      }).catch((error) => {
+        this.pendingToolUserInputRequests.delete(requestId);
+        reject(error);
+      });
+    }).catch(() => ({ answers: {} }));
+
+    await this.requireBackend().respondToElicitation(
+      sessionId,
+      backendRequestId,
+      mapToolRequestUserInputResponse(payload, response)
+    );
+    await this.publish(
+      "serverRequest/resolved",
+      {
+        threadId,
+        requestId,
+      },
+      threadId
+    );
   }
 
   private async finishTurn(threadId: string, turnId: string): Promise<void> {
