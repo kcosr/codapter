@@ -1,1 +1,7 @@
+export * from "./app-server.js";
 export * from "./backend.js";
+export * from "./config-store.js";
+export * from "./jsonrpc.js";
+export * from "./ndjson.js";
+export * from "./protocol.js";
+export * from "./thread-registry.js";
