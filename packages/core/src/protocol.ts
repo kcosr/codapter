@@ -202,6 +202,197 @@ export type ModelListResponse = {
   nextCursor: string | null;
 };
 
+export type GitInfo = {
+  sha: string | null;
+  branch: string | null;
+  originUrl: string | null;
+};
+
+export type ThreadStatus =
+  | { type: "notLoaded" }
+  | { type: "idle" }
+  | { type: "systemError" }
+  | { type: "active"; activeFlags: string[] };
+
+export type ThreadItem =
+  | { type: "userMessage"; id: string; content: JsonValue[] }
+  | { type: "agentMessage"; id: string; text: string; phase: string | null };
+
+export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+
+export type TurnError = {
+  message: string;
+  codexErrorInfo: JsonValue | null;
+  additionalDetails: string | null;
+};
+
+export type Turn = {
+  id: string;
+  items: ThreadItem[];
+  status: TurnStatus;
+  error: TurnError | null;
+};
+
+export type SessionSource = "appServer";
+
+export type Thread = {
+  id: string;
+  preview: string;
+  ephemeral: boolean;
+  modelProvider: string;
+  createdAt: number;
+  updatedAt: number;
+  status: ThreadStatus;
+  path: string | null;
+  cwd: string;
+  cliVersion: string;
+  source: SessionSource;
+  agentNickname: string | null;
+  agentRole: string | null;
+  gitInfo: GitInfo | null;
+  name: string | null;
+  turns: Turn[];
+};
+
+export type ThreadStartParams = {
+  model?: string | null;
+  modelProvider?: string | null;
+  serviceTier?: string | null;
+  cwd?: string | null;
+  approvalPolicy?: string | null;
+  approvalsReviewer?: string | null;
+  sandbox?: string | null;
+  config?: { [key: string]: JsonValue | undefined } | null;
+  serviceName?: string | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+  personality?: string | null;
+  ephemeral?: boolean | null;
+  experimentalRawEvents: boolean;
+  persistExtendedHistory: boolean;
+};
+
+export type ThreadStartResponse = {
+  thread: Thread;
+  model: string;
+  modelProvider: string;
+  serviceTier: string | null;
+  cwd: string;
+  approvalPolicy: string;
+  approvalsReviewer: string;
+  sandbox: JsonValue;
+  reasoningEffort: string | null;
+};
+
+export type ThreadResumeParams = {
+  threadId: string;
+  history?: JsonValue[] | null;
+  path?: string | null;
+  model?: string | null;
+  modelProvider?: string | null;
+  serviceTier?: string | null;
+  cwd?: string | null;
+  approvalPolicy?: string | null;
+  approvalsReviewer?: string | null;
+  sandbox?: string | null;
+  config?: { [key: string]: JsonValue | undefined } | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+  personality?: string | null;
+  persistExtendedHistory: boolean;
+};
+
+export type ThreadResumeResponse = ThreadStartResponse;
+
+export type ThreadForkParams = {
+  threadId: string;
+  path?: string | null;
+  model?: string | null;
+  modelProvider?: string | null;
+  serviceTier?: string | null;
+  cwd?: string | null;
+  approvalPolicy?: string | null;
+  approvalsReviewer?: string | null;
+  sandbox?: string | null;
+  config?: { [key: string]: JsonValue | undefined } | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+  ephemeral?: boolean;
+  persistExtendedHistory: boolean;
+};
+
+export type ThreadForkResponse = ThreadStartResponse;
+
+export type ThreadListParams = {
+  cursor?: string | null;
+  limit?: number | null;
+  sortKey?: "created_at" | "updated_at" | null;
+  modelProviders?: string[] | null;
+  sourceKinds?: string[] | null;
+  archived?: boolean | null;
+  cwd?: string | null;
+  searchTerm?: string | null;
+};
+
+export type ThreadListResponse = {
+  data: Thread[];
+  nextCursor: string | null;
+};
+
+export type ThreadLoadedListParams = {
+  cursor?: string | null;
+  limit?: number | null;
+};
+
+export type ThreadLoadedListResponse = {
+  data: string[];
+  nextCursor: string | null;
+};
+
+export type ThreadReadParams = {
+  threadId: string;
+  includeTurns: boolean;
+};
+
+export type ThreadReadResponse = {
+  thread: Thread;
+};
+
+export type ThreadSetNameParams = {
+  threadId: string;
+  name: string;
+};
+
+export type ThreadMetadataGitInfoUpdateParams = {
+  sha?: string | null;
+  branch?: string | null;
+  originUrl?: string | null;
+};
+
+export type ThreadMetadataUpdateParams = {
+  threadId: string;
+  gitInfo?: ThreadMetadataGitInfoUpdateParams | null;
+};
+
+export type ThreadArchiveParams = {
+  threadId: string;
+};
+
+export type ThreadUnarchiveParams = {
+  threadId: string;
+};
+
+export type ThreadUnsubscribeParams = {
+  threadId: string;
+};
+
+export type ThreadSetNameResponse = Record<string, never>;
+export type ThreadArchiveResponse = Record<string, never>;
+export type ThreadUnarchiveResponse = { thread: Thread };
+export type ThreadMetadataUpdateResponse = { thread: Thread };
+export type ThreadUnsubscribeStatus = "notLoaded" | "notSubscribed" | "unsubscribed";
+export type ThreadUnsubscribeResponse = { status: ThreadUnsubscribeStatus };
+
 export type ServerNotification = {
   method: string;
   params?: unknown;

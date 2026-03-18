@@ -5,7 +5,14 @@ import { type IncomingMessage, type ServerResponse, createServer } from "node:ht
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { AppServerConnection, failure, parseNdjsonLine, serializeNdjsonLine } from "@codapter/core";
+import { createPiBackend } from "@codapter/backend-pi";
+import {
+  AppServerConnection,
+  type IBackend,
+  failure,
+  parseNdjsonLine,
+  serializeNdjsonLine,
+} from "@codapter/core";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
 
 const VERSION = "0.1.0";
@@ -37,6 +44,10 @@ export interface ListenerSet {
   readonly listeners: readonly ListenerHandle[];
   readonly addresses: readonly string[];
   close(): Promise<void>;
+}
+
+export interface ListenerOptions {
+  readonly backend: IBackend;
 }
 
 type ParsedListenTarget =
@@ -134,22 +145,28 @@ export async function runCli(
 
   try {
     const parsed = parseListenTargets(commandArgs, env);
-
-    if (parsed.listenTargets.length === 0) {
-      await runStdioAppServer(stdin, stdout);
-      return { exitCode: 0 };
-    }
-
-    const listeners = await startAppServerListeners(parsed.listenTargets);
-    stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
+    const backend = createPiBackend();
+    await backend.initialize();
 
     try {
-      await waitForShutdown(environment.shutdownSignal);
-    } finally {
-      await listeners.close();
-    }
+      if (parsed.listenTargets.length === 0) {
+        await runStdioAppServer(stdin, stdout, backend);
+        return { exitCode: 0 };
+      }
 
-    return { exitCode: 0 };
+      const listeners = await startAppServerListeners(parsed.listenTargets, { backend });
+      stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
+
+      try {
+        await waitForShutdown(environment.shutdownSignal);
+      } finally {
+        await listeners.close();
+      }
+
+      return { exitCode: 0 };
+    } finally {
+      await backend.dispose();
+    }
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : "Invalid CLI arguments"}\n`);
     return { exitCode: 1 };
@@ -157,13 +174,14 @@ export async function runCli(
 }
 
 export async function startAppServerListeners(
-  listenTargets: readonly string[]
+  listenTargets: readonly string[],
+  options: ListenerOptions
 ): Promise<ListenerSet> {
   const listeners: ListenerHandle[] = [];
 
   try {
     for (const target of listenTargets) {
-      listeners.push(await startAppServerListener(target));
+      listeners.push(await startAppServerListener(target, options));
     }
   } catch (error) {
     await Promise.allSettled(listeners.map(async (listener) => listener.close()));
@@ -181,9 +199,15 @@ export async function startAppServerListeners(
 
 async function runStdioAppServer(
   stdin: NodeJS.ReadableStream,
-  stdout: NodeJS.WritableStream
+  stdout: NodeJS.WritableStream,
+  backend: IBackend
 ): Promise<void> {
-  const connection = new AppServerConnection();
+  const connection = new AppServerConnection({
+    backend,
+    onNotification(notification) {
+      stdout.write(serializeNdjsonLine(notification));
+    },
+  });
   const readline = createInterface({
     input: stdin,
     crlfDelay: Number.POSITIVE_INFINITY,
@@ -211,14 +235,17 @@ async function runStdioAppServer(
   }
 }
 
-async function startAppServerListener(rawTarget: string): Promise<ListenerHandle> {
+async function startAppServerListener(
+  rawTarget: string,
+  options: ListenerOptions
+): Promise<ListenerHandle> {
   const target = parseListenTarget(rawTarget);
 
   if (target.kind === "unix") {
-    return startUnixListener(target.socketPath);
+    return startUnixListener(target.socketPath, options);
   }
 
-  return startTcpListener(target.host, target.port);
+  return startTcpListener(target.host, target.port, options);
 }
 
 function parseListenTarget(rawTarget: string): ParsedListenTarget {
@@ -252,8 +279,12 @@ function parseListenTarget(rawTarget: string): ParsedListenTarget {
   return { kind: "tcp", host, port };
 }
 
-async function startTcpListener(host: string, port: number): Promise<ListenerHandle> {
-  const { server, websocketServer } = createRpcServer();
+async function startTcpListener(
+  host: string,
+  port: number,
+  options: ListenerOptions
+): Promise<ListenerHandle> {
+  const { server, websocketServer } = createRpcServer(options);
   server.listen(port, host);
   await once(server, "listening");
 
@@ -266,11 +297,14 @@ async function startTcpListener(host: string, port: number): Promise<ListenerHan
   return handle;
 }
 
-async function startUnixListener(socketPath: string): Promise<ListenerHandle> {
+async function startUnixListener(
+  socketPath: string,
+  options: ListenerOptions
+): Promise<ListenerHandle> {
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   await removeExistingSocket(socketPath);
 
-  const { server, websocketServer } = createRpcServer();
+  const { server, websocketServer } = createRpcServer(options);
   server.listen(socketPath);
   await once(server, "listening");
   await chmod(socketPath, 0o600);
@@ -279,14 +313,19 @@ async function startUnixListener(socketPath: string): Promise<ListenerHandle> {
   return handle;
 }
 
-function createRpcServer(): {
+function createRpcServer(options: ListenerOptions): {
   server: ReturnType<typeof createServer>;
   websocketServer: WebSocketServer;
 } {
   const websocketServer = new WebSocketServer({ noServer: true });
 
   websocketServer.on("connection", (socket: WebSocket) => {
-    const connection = new AppServerConnection();
+    const connection = new AppServerConnection({
+      backend: options.backend,
+      onNotification(notification) {
+        socket.send(JSON.stringify(notification));
+      },
+    });
     let queue = Promise.resolve();
 
     socket.on("message", (payload: RawData) => {

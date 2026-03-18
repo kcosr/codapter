@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import type { GitInfo } from "./protocol.js";
 
 export interface ThreadRegistryLogger {
   warn(message: string, context?: Record<string, unknown>): void;
@@ -18,6 +19,7 @@ export interface ThreadRegistryEntry {
   readonly cwd: string | null;
   readonly preview: string | null;
   readonly modelProvider: string | null;
+  readonly gitInfo: GitInfo | null;
 }
 
 export interface CreateThreadRegistryEntry {
@@ -28,6 +30,7 @@ export interface CreateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
+  readonly gitInfo?: GitInfo | null;
 }
 
 export interface UpdateThreadRegistryEntry {
@@ -39,6 +42,7 @@ export interface UpdateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
+  readonly gitInfo?: GitInfo | null;
 }
 
 interface ThreadRegistryFile {
@@ -80,7 +84,8 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     typeof value.archived === "boolean" &&
     (typeof value.cwd === "string" || value.cwd === null) &&
     (typeof value.preview === "string" || value.preview === null) &&
-    (typeof value.modelProvider === "string" || value.modelProvider === null)
+    (typeof value.modelProvider === "string" || value.modelProvider === null) &&
+    (isRecord(value.gitInfo) || value.gitInfo === null)
   );
 }
 
@@ -175,6 +180,7 @@ export class ThreadRegistry {
       cwd: input.cwd ?? null,
       preview: input.preview ?? null,
       modelProvider: input.modelProvider ?? null,
+      gitInfo: input.gitInfo ?? null,
     };
 
     this.entries.set(entry.threadId, entry);

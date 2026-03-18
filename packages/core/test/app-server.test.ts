@@ -1,6 +1,10 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
 import type { IBackend } from "../src/backend.js";
+import { ThreadRegistry } from "../src/thread-registry.js";
 
 function createBackend(): IBackend {
   return {
@@ -254,5 +258,88 @@ describe("AppServerConnection", () => {
       requestId: 2,
       params: '{"noisy":true}',
     });
+  });
+
+  it("starts threads, persists them in the registry, and emits notifications", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: unknown[] = [];
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      threadRegistry,
+      onNotification(notification) {
+        notifications.push(notification);
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      });
+      expect(started).toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            id: expect.any(String),
+            cwd: "/repo",
+            modelProvider: "pi",
+            status: { type: "idle" },
+          },
+        },
+      });
+
+      const listed = await connection.handleMessage({
+        id: 3,
+        method: "thread/list",
+        params: {},
+      });
+      expect(listed).toMatchObject({
+        id: 3,
+        result: {
+          data: [
+            {
+              id: expect.any(String),
+              cwd: "/repo",
+            },
+          ],
+          nextCursor: null,
+        },
+      });
+
+      expect(notifications).toHaveLength(2);
+      expect(notifications[0]).toMatchObject({
+        method: "thread/started",
+        params: {
+          thread: {
+            id: expect.any(String),
+          },
+        },
+      });
+      expect(notifications[1]).toMatchObject({
+        method: "thread/status/changed",
+        params: {
+          threadId: expect.any(String),
+          status: { type: "idle" },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

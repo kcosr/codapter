@@ -1,6 +1,7 @@
 import { stat, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { PassThrough, Readable } from "node:stream";
+import { createPiBackend } from "@codapter/backend-pi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import {
@@ -58,6 +59,19 @@ function waitForWebSocketMessage(websocket: WebSocket): Promise<unknown> {
     });
     websocket.once("error", reject);
   });
+}
+
+async function startListeners(listenTargets: readonly string[]) {
+  const backend = createPiBackend();
+  await backend.initialize();
+  const listeners = await startAppServerListeners(listenTargets, { backend });
+  return {
+    listeners,
+    async close() {
+      await listeners.close();
+      await backend.dispose();
+    },
+  };
 }
 
 describe("parseListenTargets", () => {
@@ -125,10 +139,10 @@ describe("runCli", () => {
 
 describe("startAppServerListeners", () => {
   it("serves initialize over TCP WebSocket and health probes over HTTP", async () => {
-    const listeners = await startAppServerListeners(["ws://127.0.0.1:0"]);
+    const runtime = await startListeners(["ws://127.0.0.1:0"]);
 
     try {
-      const address = listeners.addresses[0];
+      const address = runtime.listeners.addresses[0];
       const websocket = await connectWebSocket(address);
       websocket.send(
         JSON.stringify({
@@ -160,41 +174,47 @@ describe("startAppServerListeners", () => {
         body: "ok",
       });
     } finally {
-      await listeners.close();
+      await runtime.close();
     }
   });
 
   it("rejects websocket upgrades with an Origin header", async () => {
-    const listeners = await startAppServerListeners(["ws://127.0.0.1:0"]);
+    const runtime = await startListeners(["ws://127.0.0.1:0"]);
 
     try {
-      const address = listeners.addresses[0];
+      const address = runtime.listeners.addresses[0];
       await expect(
         connectWebSocket(address, { headers: { Origin: "https://example.com" } })
       ).rejects.toBeInstanceOf(Error);
     } finally {
-      await listeners.close();
+      await runtime.close();
     }
   });
 
   it("creates UDS listeners with secure permissions and removes them on shutdown", async () => {
     const socketPath = await createUnixSocketPath();
-    const listeners = await startAppServerListeners([`unix://${socketPath}`]);
+    const runtime = await startListeners([`unix://${socketPath}`]);
 
     const stats = await stat(socketPath);
     expect(stats.isSocket()).toBe(true);
     expect(getSocketMode(stats.mode)).toBe(0o600);
 
-    await listeners.close();
+    await runtime.close();
     await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects replacing a non-socket UDS path", async () => {
     const socketPath = await createUnixSocketPath();
     await writeFile(socketPath, "not-a-socket", "utf8");
+    const backend = createPiBackend();
+    await backend.initialize();
 
-    await expect(startAppServerListeners([`unix://${socketPath}`])).rejects.toThrow(
-      `Refusing to replace non-socket path: ${socketPath}`
-    );
+    try {
+      await expect(startAppServerListeners([`unix://${socketPath}`], { backend })).rejects.toThrow(
+        `Refusing to replace non-socket path: ${socketPath}`
+      );
+    } finally {
+      await backend.dispose();
+    }
   });
 });

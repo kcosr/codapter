@@ -26,6 +26,7 @@ describe("ThreadRegistry", () => {
       backendType: "pi",
       cwd: "/repo",
       preview: "hello",
+      gitInfo: null,
     });
 
     expect(created.threadId).toMatch(
@@ -44,11 +45,13 @@ describe("ThreadRegistry", () => {
       archived: true,
       name: "Renamed",
       modelProvider: "openai",
+      gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });
     expect(updated).toMatchObject({
       archived: true,
       name: "Renamed",
       modelProvider: "openai",
+      gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });
 
     expect(await registry.list()).toHaveLength(1);
@@ -92,6 +95,7 @@ describe("ThreadRegistry", () => {
             cwd: null,
             preview: null,
             modelProvider: null,
+            gitInfo: null,
           },
           {
             threadId: 123,
