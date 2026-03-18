@@ -83,7 +83,6 @@ The current backend implementation is Pi-backed.
 
 ## Current Limitations
 
-- Elicitation is not fully wired through the GUI-facing app-server path yet.
+- Pi-backed elicitation is supported through `item/tool/requestUserInput`. MCP server elicitation is still unsupported.
 - Remote tunnel orchestration is not automated by codapter. Use your own SSH or port-forward setup if you want to connect to a WebSocket listener remotely.
 - The current backend implementation is Pi-specific.
-

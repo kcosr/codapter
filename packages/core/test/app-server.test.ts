@@ -323,6 +323,43 @@ describe("AppServerConnection", () => {
     });
   });
 
+  it("returns method-not-found for unsupported worktree RPCs", async () => {
+    const connection = new AppServerConnection({
+      logger: {
+        warn() {},
+      },
+    });
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.1.0" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    for (const [index, method] of [
+      "create-worktree",
+      "delete-worktree",
+      "resolve-worktree-for-thread",
+      "worktree-cleanup-inputs",
+    ].entries()) {
+      await expect(
+        connection.handleMessage({
+          id: index + 2,
+          method,
+          params: {},
+        })
+      ).resolves.toEqual({
+        id: index + 2,
+        error: {
+          code: -32601,
+          message: `Method not found: ${method}`,
+        },
+      });
+    }
+  });
+
   it("starts threads, persists them in the registry, and emits notifications", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));

@@ -13,7 +13,8 @@
     "check": "npm run build && npm run lint && npm run test",
     "lint": "biome check .",
     "prepare": "husky",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run --passWithNoTests",
+    "test:smoke": "PI_SMOKE_TEST=1 vitest run test/smoke/"
   },
   "lint-staged": {
     "*.{js,mjs,cjs,ts,tsx,json,md}": ["biome check --write --no-errors-on-unmatched"]

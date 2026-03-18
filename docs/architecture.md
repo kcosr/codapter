@@ -80,8 +80,7 @@ The adapter-owned registry is the source of truth for thread metadata.
 
 ## Current Limitations
 
-- Elicitation is not yet wired through the Codex app-server surface. The backend can surface `elicitation_request`, but the adapter does not yet expose a server-request round trip for GUI responses.
+- Pi-backed elicitation is wired through outbound `item/tool/requestUserInput` server requests, but MCP server elicitation is still unsupported.
 - Tool translation is heuristic-based for non-command/file-change tools.
 - The implementation is intentionally backend-specific to Pi for now.
 - Remote/Desktop end-to-end validation is still a separate integration step.
-

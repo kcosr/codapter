@@ -87,7 +87,7 @@ Status:
 | `model/list` | `backend.listModels()` via `AppServerConnection` | Translated from Pi model summaries to Codex model shapes. |
 | `turn/start` model selection | `backend.setModel()` | If a model is requested, it is set before prompting. |
 | `backend.getCapabilities()` | `backend-pi` capability snapshot | Currently reports image, thinking, and parallel tool support. |
-| `backend.respondToElicitation()` | `backend-pi` process bridge | Implemented at the backend layer, but the Codex app-server request/response path is not wired yet. |
+| `backend.respondToElicitation()` | `backend-pi` process bridge | Wired through outbound `item/tool/requestUserInput` server requests and inbound JSON-RPC responses. |
 
 ## `command/exec`
 
@@ -121,15 +121,14 @@ Behavior notes:
 | Codex concept | Current state | Notes |
 | --- | --- | --- |
 | Worktree RPCs (`create-worktree`, `delete-worktree`, `resolve-worktree-for-thread`, `worktree-cleanup-inputs`) | Not implemented | They currently return `Method not found`. |
-| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Partially implemented | Pi emits `elicitation_request` events, but codapter does not yet surface them as outgoing Codex server requests. |
+| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Partially implemented | Pi-backed `item/tool/requestUserInput` is implemented. MCP server elicitation is still unsupported. |
 | Legacy `codex/event/*` compatibility | Not implemented as a public surface | The current implementation targets the typed app-server surface instead. |
 | Remote deployment flow | Supported only through the CLI listener transport | There is no separate remote orchestration layer in codapter. |
 
 ## Current Gaps
 
-The implementation is usable for threads, turns, Pi-backed replies, and standalone commands. The main remaining gaps are:
+The implementation is usable for threads, turns, Pi-backed replies, standalone commands, and Pi-backed user-input prompts. The main remaining gaps are:
 
-1. Elicitation needs a server-request transport path, not just a backend event.
-2. Worktree RPCs are still unsupported.
-3. Documentation/release polish is still incomplete compared to the Milestone 6 checklist.
-
+1. Worktree RPCs are still unsupported.
+2. Turn-level diff/plan notifications are not emitted.
+3. Remote tunnel orchestration is still external to codapter.
