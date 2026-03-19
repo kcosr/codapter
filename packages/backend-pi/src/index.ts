@@ -26,6 +26,7 @@ export interface PiBackendOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;
   readonly debugLogFilePath?: string | null;
+  readonly idleTimeoutMs?: number;
 }
 
 interface ManagedSession {
@@ -96,8 +97,10 @@ export class PiBackend implements IBackend {
     readonly env?: NodeJS.ProcessEnv;
     readonly cwd?: string;
   };
+  private readonly idleTimeoutMs: number;
   private readonly stateStore: PiBackendStateStore;
   private readonly sessions = new Map<string, ManagedSession>();
+  private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly modelCache = new Map<string, BackendModelSummary>();
   private initialized = false;
   private disposed = false;
@@ -130,6 +133,7 @@ export class PiBackend implements IBackend {
       };
     }
     this.launchOptions = launchOptions;
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
     this.stateStore = new PiBackendStateStore(this.sessionDir);
   }
 
@@ -141,6 +145,11 @@ export class PiBackend implements IBackend {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+
+    for (const timer of this.idleTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.idleTimers.clear();
 
     const disposals = Array.from(this.sessions.values(), async (session) => {
       await session.process.dispose().catch(() => {});
@@ -163,6 +172,7 @@ export class PiBackend implements IBackend {
     const record = await this.persistSnapshot(sessionId, snapshot);
     const session = { process, record };
     this.sessions.set(sessionId, session);
+    this.resetIdleTimer(sessionId);
 
     return sessionId;
   }
@@ -170,6 +180,7 @@ export class PiBackend implements IBackend {
   async resumeSession(sessionId: string): Promise<string> {
     this.assertReady();
     await this.ensureActiveSession(sessionId);
+    this.resetIdleTimer(sessionId);
     return sessionId;
   }
 
@@ -199,12 +210,14 @@ export class PiBackend implements IBackend {
     const record = await this.persistSnapshot(forkedSessionId, snapshot, source.record.createdAt);
     const session = { process, record };
     this.sessions.set(forkedSessionId, session);
+    this.resetIdleTimer(forkedSessionId);
     return forkedSessionId;
   }
 
   async disposeSession(sessionId: string): Promise<void> {
     this.assertReady();
     await this.requireRecord(sessionId);
+    this.clearIdleTimer(sessionId);
 
     const session = this.sessions.get(sessionId);
     if (session) {
@@ -217,6 +230,7 @@ export class PiBackend implements IBackend {
     this.assertReady();
     const session = this.sessions.get(sessionId);
     if (session?.process.isRunning()) {
+      this.resetIdleTimer(sessionId);
       return cloneMessages(await session.process.getMessages());
     }
 
@@ -238,6 +252,7 @@ export class PiBackend implements IBackend {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
     await session.process.setSessionName(name);
+    this.resetIdleTimer(sessionId);
     session.record = await this.updateRecord(sessionId, {
       sessionName: name,
       updatedAt: nowIso(),
@@ -254,6 +269,7 @@ export class PiBackend implements IBackend {
     const session = await this.ensureActiveSession(sessionId);
 
     await session.process.prompt(turnId, text, images);
+    this.resetIdleTimer(sessionId);
     session.record = await this.updateRecord(sessionId, {
       updatedAt: nowIso(),
     });
@@ -263,6 +279,7 @@ export class PiBackend implements IBackend {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
     await session.process.abort();
+    this.resetIdleTimer(sessionId);
     session.record = await this.updateRecord(sessionId, {
       updatedAt: nowIso(),
     });
@@ -310,6 +327,7 @@ export class PiBackend implements IBackend {
     this.assertReady();
     const session = await this.ensureActiveSession(sessionId);
     await session.process.respondToElicitation(requestId, response);
+    this.resetIdleTimer(sessionId);
     session.record = await this.updateRecord(sessionId, {
       updatedAt: nowIso(),
     });
@@ -317,9 +335,14 @@ export class PiBackend implements IBackend {
 
   onEvent(sessionId: string, listener: (event: BackendEvent) => void): Disposable {
     this.assertReady();
+    const wrappedListener = (event: BackendEvent) => {
+      this.resetIdleTimer(sessionId);
+      listener(event);
+    };
+
     const session = this.sessions.get(sessionId);
     if (session?.process.isRunning()) {
-      return session.process.addListener(listener);
+      return session.process.addListener(wrappedListener);
     }
 
     let disposed = false;
@@ -333,13 +356,44 @@ export class PiBackend implements IBackend {
 
     void this.ensureActiveSession(sessionId).then((active) => {
       if (!disposed) {
-        listenerDisposable = active.process.addListener(listener);
+        listenerDisposable = active.process.addListener(wrappedListener);
       } else {
         listenerDisposable?.dispose();
       }
     });
 
     return disposable;
+  }
+
+  private resetIdleTimer(sessionId: string): void {
+    this.clearIdleTimer(sessionId);
+    if (this.idleTimeoutMs <= 0 || this.disposed) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      this.idleTimers.delete(sessionId);
+      void this.disposeIdleSession(sessionId);
+    }, this.idleTimeoutMs);
+    timer.unref();
+    this.idleTimers.set(sessionId, timer);
+  }
+
+  private clearIdleTimer(sessionId: string): void {
+    const existing = this.idleTimers.get(sessionId);
+    if (existing) {
+      clearTimeout(existing);
+      this.idleTimers.delete(sessionId);
+    }
+  }
+
+  private async disposeIdleSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    console.error(`[codapter] Idle timeout: disposing Pi session ${sessionId}`);
+    await session.process.dispose().catch(() => {});
+    this.sessions.delete(sessionId);
   }
 
   private assertNotDisposed(): void {

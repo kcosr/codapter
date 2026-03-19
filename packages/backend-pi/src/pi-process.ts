@@ -529,7 +529,7 @@ export class PiProcessSession {
         const timeout = setTimeout(() => {
           this.process?.kill("SIGKILL");
           resolve();
-        }, 1000);
+        }, 5000);
 
         this.process?.once("exit", () => {
           clearTimeout(timeout);

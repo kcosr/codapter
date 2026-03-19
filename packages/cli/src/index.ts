@@ -155,9 +155,15 @@ export async function runCli(
       }
       piArgs = parsed;
     }
+    const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
+    const piIdleTimeoutMs =
+      piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
+        ? Number(piIdleTimeoutRaw)
+        : undefined;
     const backend = createPiBackend({
       ...(piCommand ? { command: piCommand } : {}),
       ...(piArgs ? { args: piArgs } : {}),
+      ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
     });
     await backend.initialize();
 

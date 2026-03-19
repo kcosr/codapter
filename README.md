@@ -234,6 +234,7 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 | `CODAPTER_LISTEN` | Comma-separated listener URIs (alternative to `--listen`) | *(stdio)* |
 | `CODAPTER_PI_COMMAND` | Override the command used to launch Pi | `npx` |
 | `CODAPTER_PI_ARGS` | Override Pi launch args (JSON array string); `--session-dir` is always appended | `["--yes","@mariozechner/pi-coding-agent","--mode","rpc"]` |
+| `CODAPTER_PI_IDLE_TIMEOUT_MS` | Idle timeout before Pi processes are gracefully stopped (ms; 0 disables) | `300000` (5 min) |
 | `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codex-app-server` |
 | `CODAPTER_DEBUG_LOG_FILE` | Path to JSONL debug log file | *(disabled)* |
 
