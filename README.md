@@ -1,5 +1,7 @@
 # Codapter
 
+> **WIP / Prototype** — This project is an early-stage proof of concept. APIs, configuration, and behavior may change without notice. Not recommended for production use.
+
 A protocol adapter that lets the [Codex Desktop](https://developers.openai.com/codex/app) GUI work with alternative AI backends. Set `CODEX_CLI_PATH` to point at codapter, launch Codex Desktop, and your conversations are powered by the backend of your choice.
 
 ![Codapter running inside Codex Desktop](docs/images/codex-desktop-example.png)
