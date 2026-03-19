@@ -232,6 +232,9 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 |----------|-------------|---------|
 | `CODEX_CLI_PATH` | Set this to codapter's path so Codex Desktop uses it | — |
 | `CODAPTER_LISTEN` | Comma-separated listener URIs (alternative to `--listen`) | *(stdio)* |
+| `CODAPTER_PI_COMMAND` | Override the command used to launch Pi | `npx` |
+| `CODAPTER_PI_ARGS` | Override Pi launch args (JSON array string); `--session-dir` is always appended | `["--yes","@mariozechner/pi-coding-agent","--mode","rpc"]` |
+| `CODAPTER_PI_IDLE_TIMEOUT_MS` | Idle timeout before Pi processes are gracefully stopped (ms; 0 disables) | `300000` (5 min) |
 | `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codex-app-server` |
 | `CODAPTER_DEBUG_LOG_FILE` | Path to JSONL debug log file | *(disabled)* |
 
@@ -269,7 +272,7 @@ The Pi backend uses its own configuration at `~/.pi/agent/`:
 | `config/read` | Read adapter configuration |
 | `config/value/write` / `config/batchWrite` | Write configuration (in-memory) |
 | `configRequirements/read` | Returns null (no requirements) |
-| `getAuthStatus` / `account/read` | Returns null (no auth needed) |
+| `getAuthStatus` / `account/read` | Returns synthetic auth state (chatgpt/pro) |
 | `command/exec` | Execute shell commands (adapter-native) |
 | `command/exec/write` | Write to process stdin |
 | `command/exec/terminate` | Kill running process |
@@ -463,18 +466,55 @@ PI_SMOKE_TEST=1 npm run test:smoke
 
 ## Debugging
 
-Enable debug logging to see all JSON-RPC traffic and backend events:
+### Codapter Debug Log
+
+Enable debug logging to see backend events and Pi process I/O:
 
 ```bash
 export CODAPTER_DEBUG_LOG_FILE=/tmp/codapter-debug.jsonl
 node dist/codapter.mjs app-server
 ```
 
-The debug log captures:
-- All incoming/outgoing JSON-RPC messages
-- Backend events with timestamps
-- Pi process stdin/stdout traffic
-- Token usage parsing traces
+The debug log captures backend events with timestamps, Pi process stdin/stdout traffic, and token usage parsing traces.
+
+### Stdio Tap
+
+To inspect the raw JSON-RPC traffic between Codex Desktop and the CLI process, use the stdio tap script. It sits between the GUI and the real CLI, logging every line in both directions:
+
+```bash
+# Tap codapter to see what it sends/receives:
+CODEX_CLI_PATH=./scripts/stdio-tap.mjs /Applications/Codex.app/Contents/MacOS/Codex
+
+# Tap the real codex CLI for comparison:
+TAP_TARGET=/Applications/Codex.app/Contents/Resources/codex \
+  CODEX_CLI_PATH=./scripts/stdio-tap.mjs /Applications/Codex.app/Contents/MacOS/Codex
+```
+
+Log output goes to `/tmp/stdio-tap.log` (override with `TAP_LOG`). Each line is prefixed with direction (`GUI→CLI` or `CLI→GUI`) and a timestamp.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TAP_TARGET` | Path to the real CLI binary to wrap | `/usr/local/bin/codapter.mjs` |
+| `TAP_LOG` | Path to the tap log file | `/tmp/stdio-tap.log` |
+
+### Codex Desktop Debug Flags
+
+The Codex Desktop Electron app supports build flavor overrides that enable DevTools and a debug menu:
+
+```bash
+# DevTools + debug menu, Sparkle updates still enabled (recommended):
+BUILD_FLAVOR=internal-alpha /Applications/Codex.app/Contents/MacOS/Codex
+
+# DevTools + debug menu + inspect element, Sparkle updates disabled:
+BUILD_FLAVOR=dev /Applications/Codex.app/Contents/MacOS/Codex
+```
+
+These flags are pure functions of `buildFlavor` and cannot be toggled individually. Sparkle (auto-update on macOS) has one additional override:
+
+```bash
+# Disable Sparkle regardless of build flavor:
+CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
+```
 
 ## Limitations
 

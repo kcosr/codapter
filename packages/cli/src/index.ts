@@ -145,8 +145,35 @@ export async function runCli(
 
   try {
     const parsed = parseListenTargets(commandArgs, env);
-    const backend = createPiBackend();
+    const piCommand = env.CODAPTER_PI_COMMAND;
+    const piArgsRaw = env.CODAPTER_PI_ARGS;
+    let piArgs: string[] | undefined;
+    if (piArgsRaw) {
+      const parsed = JSON.parse(piArgsRaw);
+      if (!Array.isArray(parsed)) {
+        throw new Error("CODAPTER_PI_ARGS must be a JSON array of strings");
+      }
+      piArgs = parsed;
+    }
+    const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
+    const piIdleTimeoutMs =
+      piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
+        ? Number(piIdleTimeoutRaw)
+        : undefined;
+    const backend = createPiBackend({
+      ...(piCommand ? { command: piCommand } : {}),
+      ...(piArgs ? { args: piArgs } : {}),
+      ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
+    });
     await backend.initialize();
+
+    const signalCodes: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
+    const cleanup = async (signal: string) => {
+      await backend.dispose();
+      process.exit(signalCodes[signal] ?? 1);
+    };
+    process.on("SIGINT", () => cleanup("SIGINT"));
+    process.on("SIGTERM", () => cleanup("SIGTERM"));
 
     try {
       if (parsed.listenTargets.length === 0) {

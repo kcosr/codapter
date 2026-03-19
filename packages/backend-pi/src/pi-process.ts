@@ -125,18 +125,6 @@ function normalizeModelKey(provider: string, id: string): string {
   return `${provider}/${id}`;
 }
 
-function parseModelKey(modelId: string): { provider: string; id: string } {
-  const slashIndex = modelId.indexOf("/");
-  if (slashIndex === -1) {
-    return { provider: "", id: modelId };
-  }
-
-  return {
-    provider: modelId.slice(0, slashIndex),
-    id: modelId.slice(slashIndex + 1),
-  };
-}
-
 function mapTokenUsage(stats: unknown): BackendTokenUsage {
   const record = isRecord(stats) ? stats : {};
   const tokens = isRecord(record.tokens)
@@ -311,22 +299,6 @@ function isToolUseAssistantMessage(message: unknown): boolean {
   return messageRole(message) === "assistant" && messageStopReason(message) === "toolUse";
 }
 
-function toImageContent(
-  images?: readonly BackendImageInput[]
-): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
-  if (!images || images.length === 0) {
-    return undefined;
-  }
-
-  return images.map((image) => {
-    if (typeof image.data === "string" && image.data.length > 0) {
-      return { type: "image", data: image.data, mimeType: image.mimeType ?? "image/png" };
-    }
-
-    throw new Error("Pi backend requires image data to be provided as base64");
-  });
-}
-
 export function mapAvailableModelsToSummaries(models: unknown): BackendModelSummary[] {
   if (!Array.isArray(models)) {
     return [];
@@ -378,7 +350,6 @@ export class PiProcessSession {
   private currentTurnId: string | null = null;
   private currentSessionFile: string | undefined;
   private currentSessionName: string | undefined;
-  private currentModelId: string | undefined;
   private currentModelContextWindow: number | null = null;
   private readonly logWriter: PiLogWriter | null;
   private lastExitCode: number | null = null;
@@ -388,7 +359,9 @@ export class PiProcessSession {
   constructor(options: PiProcessLaunchOptions) {
     this.opaqueSessionId = options.opaqueSessionId;
     this.command = options.command ?? defaultCommand();
-    this.args = options.args ?? defaultArgs(options.sessionDir);
+    this.args = options.args
+      ? [...options.args, "--session-dir", options.sessionDir]
+      : defaultArgs(options.sessionDir);
     this.env = options.env ?? process.env;
     this.cwd = options.cwd ?? process.cwd();
     const logFilePath = this.env.CODAPTER_DEBUG_LOG_FILE;
@@ -502,9 +475,6 @@ export class PiProcessSession {
       modelId,
     });
     const model = parseUpstreamModelFromResponse(response.data);
-    this.currentModelId = model
-      ? normalizeModelKey(model.provider, model.id)
-      : normalizeModelKey(provider, modelId);
     this.currentModelContextWindow = model
       ? parseStateModelContextWindow(model)
       : this.currentModelContextWindow;
@@ -559,7 +529,7 @@ export class PiProcessSession {
         const timeout = setTimeout(() => {
           this.process?.kill("SIGKILL");
           resolve();
-        }, 1000);
+        }, 5000);
 
         this.process?.once("exit", () => {
           clearTimeout(timeout);
@@ -680,10 +650,10 @@ export class PiProcessSession {
       return;
     }
 
-    await this.handleEvent(parsed);
+    this.handleEvent(parsed);
   }
 
-  private async handleEvent(event: Record<string, unknown>): Promise<void> {
+  private handleEvent(event: Record<string, unknown>): void {
     switch (event.type) {
       case "turn_start":
         return;
@@ -691,7 +661,7 @@ export class PiProcessSession {
         if (isToolUseAssistantMessage(event.message)) {
           return;
         }
-        await this.emitTokenUsage(this.currentTurnId ?? "unknown");
+        this.emitTokenUsage(this.currentTurnId ?? "unknown");
         this.currentTurnId = null;
         return;
       case "message_update":
@@ -959,7 +929,6 @@ export class PiProcessSession {
   private applySnapshot(snapshot: PiSessionStateSnapshot): void {
     this.currentSessionFile = snapshot.sessionFile;
     this.currentSessionName = snapshot.sessionName;
-    this.currentModelId = snapshot.modelId;
     this.currentModelContextWindow = snapshot.modelContextWindow;
   }
 

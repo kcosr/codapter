@@ -293,7 +293,7 @@ describe("AppServerConnection", () => {
         },
         {
           method: "account/updated",
-          params: { authMode: "chatgptAuthTokens", planType: "pro" },
+          params: { authMode: "chatgpt", planType: "pro" },
         },
       ])
     );
@@ -308,7 +308,7 @@ describe("AppServerConnection", () => {
       id: 3,
       result: {
         account: { type: "chatgpt", email: "user@example.com", planType: "pro" },
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 
@@ -321,9 +321,9 @@ describe("AppServerConnection", () => {
     ).resolves.toEqual({
       id: 4,
       result: {
-        authMethod: "chatgptAuthTokens",
+        authMethod: "chatgpt",
         authToken: accessToken,
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 
@@ -347,7 +347,7 @@ describe("AppServerConnection", () => {
       id: 6,
       result: {
         account: null,
-        requiresOpenaiAuth: false,
+        requiresOpenaiAuth: true,
       },
     });
 
@@ -1419,6 +1419,386 @@ describe("AppServerConnection", () => {
       ]);
       expect(outgoing.some((message) => message.method === "serverRequest/resolved")).toBe(true);
       expect(outgoing.some((message) => message.method === "turn/completed")).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("buffers turn/start during starting state and executes after ready", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    let resolveResume!: () => void;
+    const backend = new TestBackend();
+    const originalResume = backend.resumeSession.bind(backend);
+    vi.spyOn(backend, "resumeSession").mockImplementation(async (sessionId: string) => {
+      await new Promise<void>((resolve) => {
+        resolveResume = resolve;
+      });
+      return originalResume(sessionId);
+    });
+
+    const entry = await threadRegistry.create({
+      backendSessionId: "session_1",
+      backendType: "pi",
+      cwd: "/repo",
+      preview: "hello",
+      modelProvider: "pi",
+      gitInfo: null,
+    });
+
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      // Start resume (blocks on slow resumeSession)
+      const resumePromise = connection.handleMessage({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: entry.threadId,
+          persistExtendedHistory: false,
+        },
+      });
+
+      // Give the resume handler time to enter starting state
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Send turn/start while thread is still starting — should buffer
+      const turnPromise = connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: entry.threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      // Unblock the resume
+      resolveResume();
+
+      const [resumed, turnStarted] = await Promise.all([resumePromise, turnPromise]);
+
+      expect(resumed).toMatchObject({
+        id: 2,
+        result: {
+          thread: { id: entry.threadId },
+        },
+      });
+
+      expect(turnStarted).toMatchObject({
+        id: 3,
+        result: {
+          turn: {
+            id: expect.any(String),
+            status: "inProgress",
+          },
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects turn/start during forking state", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    let resolveFork!: () => void;
+    const backend = new TestBackend();
+    const originalFork = backend.forkSession.bind(backend);
+    vi.spyOn(backend, "forkSession").mockImplementation(async (sessionId: string) => {
+      await new Promise<void>((resolve) => {
+        resolveFork = resolve;
+      });
+      return originalFork(sessionId);
+    });
+
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      // Start fork (blocks on slow forkSession)
+      const forkPromise = connection.handleMessage({
+        id: 3,
+        method: "thread/fork",
+        params: {
+          threadId,
+          persistExtendedHistory: false,
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // turn/start on the source thread during forking should fail
+      const turnResult = await connection.handleMessage({
+        id: 4,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      expect(turnResult).toMatchObject({
+        id: 4,
+        error: {
+          code: -32603,
+          message: expect.stringContaining("forking"),
+        },
+      });
+
+      resolveFork();
+      await forkPromise;
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects turn/start during terminating state", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    let resolveDispose!: () => void;
+    const backend = new TestBackend();
+    vi.spyOn(backend, "disposeSession").mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        resolveDispose = resolve;
+      });
+    });
+
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      // Start archive (blocks on slow disposeSession — sets terminating state)
+      const archivePromise = connection.handleMessage({
+        id: 3,
+        method: "thread/archive",
+        params: { threadId },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // turn/start during terminating should fail
+      const turnResult = await connection.handleMessage({
+        id: 4,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      expect(turnResult).toMatchObject({
+        id: 4,
+        error: {
+          code: -32603,
+          message: expect.stringContaining("terminating"),
+        },
+      });
+
+      resolveDispose();
+      await archivePromise;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("unblocks buffered turn/start with an error when resume fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    let rejectResume!: (error: Error) => void;
+    const backend = new TestBackend();
+    vi.spyOn(backend, "resumeSession").mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectResume = reject;
+        })
+    );
+
+    const entry = await threadRegistry.create({
+      backendSessionId: "session_1",
+      backendType: "pi",
+      cwd: "/repo",
+      preview: "hello",
+      modelProvider: "pi",
+      gitInfo: null,
+    });
+
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      // Start resume (will fail)
+      const resumePromise = connection.handleMessage({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: entry.threadId,
+          persistExtendedHistory: false,
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      // Send turn/start while thread is starting — will buffer
+      const turnPromise = connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: entry.threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      // Now reject the resume — unblocks the buffered turn/start
+      rejectResume(new Error("backend unavailable"));
+
+      const [resumed, turnResult] = await Promise.all([resumePromise, turnPromise]);
+
+      // Resume returns the backend error
+      expect(resumed).toMatchObject({
+        id: 2,
+        error: {
+          code: -32603,
+          message: "backend unavailable",
+        },
+      });
+
+      // Buffered turn/start gets unblocked with an error
+      expect(turnResult).toMatchObject({
+        id: 3,
+        error: {
+          code: -32603,
+          message: expect.stringContaining("not ready"),
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("logs state transitions to the debug log file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-state-log-"));
+    const logFilePath = join(directory, "debug.jsonl");
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend();
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      debugLogFilePath: logFilePath,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      });
+
+      await connection.dispose();
+
+      const lines = (await readFile(logFilePath, "utf8")).trim().split("\n");
+      const records = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+      const transitions = records.filter((r) => r.kind === "state-transition");
+
+      expect(transitions.length).toBeGreaterThanOrEqual(2);
+      expect(transitions[0]).toMatchObject({
+        kind: "state-transition",
+        payload: { from: "none", to: "starting" },
+      });
+      expect(transitions[1]).toMatchObject({
+        kind: "state-transition",
+        payload: { from: "starting", to: "ready" },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -26,6 +26,7 @@ import type {
   AccountLoginCompletedNotification,
   AccountUpdatedNotification,
   AppListResponse,
+  AuthMode,
   CancelLoginAccountParams,
   CancelLoginAccountResponse,
   CollaborationModeListResponse,
@@ -41,7 +42,6 @@ import type {
   ConfigValueWriteParams,
   ConfigWriteResponse,
   ExperimentalFeatureListResponse,
-  GetAccountParams,
   GetAccountRateLimitsResponse,
   GetAccountResponse,
   GetAuthStatusResponse,
@@ -152,12 +152,14 @@ interface ConnectionState {
 
 interface ThreadRuntime {
   sessionId: string;
-  status: "ready" | "turn_active";
+  status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
   activeTurnId: string | null;
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
   eventQueue: Promise<void>;
+  readyResolver: (() => void) | null;
+  readyPromise: Promise<void> | null;
 }
 
 interface PendingToolUserInputRequest {
@@ -312,7 +314,7 @@ function defaultLogger(): AppServerLogger {
 interface DebugLogRecord {
   readonly at: string;
   readonly component: "app-server";
-  readonly kind: "startup" | "shutdown" | "backend-event" | "notification";
+  readonly kind: "startup" | "shutdown" | "backend-event" | "notification" | "state-transition";
   readonly threadId?: string;
   readonly turnId?: string;
   readonly accepted?: boolean;
@@ -705,10 +707,18 @@ function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus
   if (!runtime) {
     return { type: "notLoaded" };
   }
-  if (runtime.status === "turn_active") {
-    return { type: "active", activeFlags: ["turn"] };
+  switch (runtime.status) {
+    case "turn_active":
+      return { type: "active", activeFlags: ["turn"] };
+    case "starting":
+      return { type: "active", activeFlags: ["starting"] };
+    case "forking":
+      return { type: "active", activeFlags: ["forking"] };
+    case "terminating":
+      return { type: "active", activeFlags: ["terminating"] };
+    default:
+      return { type: "idle" };
   }
-  return { type: "idle" };
 }
 
 function turnErrorFromUnknown(error: unknown) {
@@ -873,7 +883,13 @@ export class AppServerConnection {
     string | number,
     PendingToolUserInputRequest
   >();
-  private authState: StoredAuthState | null = null;
+  private authState: StoredAuthState | null = {
+    mode: "chatgptAuthTokens",
+    accessToken: "codapter",
+    accountId: "codapter",
+    email: "codapter@localhost",
+    planType: "pro",
+  };
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,
@@ -910,6 +926,10 @@ export class AppServerConnection {
 
   async dispose(): Promise<void> {
     for (const runtime of this.threadRuntimes.values()) {
+      runtime.status = "terminating";
+      runtime.readyResolver?.();
+      runtime.readyResolver = null;
+      runtime.readyPromise = null;
       runtime.subscription?.dispose();
     }
     for (const request of this.pendingToolUserInputRequests.values()) {
@@ -1110,6 +1130,14 @@ export class AppServerConnection {
 
     if (message.method === "initialized") {
       this.state.initializedNotificationReceived = true;
+      if (this.authState) {
+        void this.publishAccountLoginCompleted({
+          loginId: null,
+          success: true,
+          error: null,
+        });
+        void this.publishAccountUpdated();
+      }
     }
 
     return null;
@@ -1212,8 +1240,7 @@ export class AppServerConnection {
     return { requirements: null };
   }
 
-  private handleAccountRead(params: unknown): GetAccountResponse {
-    const parsed = (params ?? {}) as Partial<GetAccountParams>;
+  private handleAccountRead(_params: unknown): GetAccountResponse {
     const account =
       this.authState?.mode === "apikey"
         ? { type: "apiKey" as const }
@@ -1226,7 +1253,7 @@ export class AppServerConnection {
           : null;
     return {
       account,
-      requiresOpenaiAuth: Boolean(parsed.refreshToken) && false,
+      requiresOpenaiAuth: true,
     };
   }
 
@@ -1299,10 +1326,16 @@ export class AppServerConnection {
     };
   }
 
+  private get effectiveAuthMode(): AuthMode | null {
+    if (!this.authState) {
+      return null;
+    }
+    return this.authState.mode === "chatgptAuthTokens" ? "chatgpt" : this.authState.mode;
+  }
+
   private handleGetAuthStatus(params: unknown): GetAuthStatusResponse {
     const parsed = (params ?? {}) as { includeToken?: boolean | null } | null;
     const includeToken = Boolean(parsed?.includeToken);
-    const authMethod = this.authState?.mode ?? null;
     const authToken =
       !includeToken || !this.authState
         ? null
@@ -1310,15 +1343,15 @@ export class AppServerConnection {
           ? this.authState.apiKey
           : this.authState.accessToken;
     return {
-      authMethod,
+      authMethod: this.effectiveAuthMode,
       authToken,
-      requiresOpenaiAuth: false,
+      requiresOpenaiAuth: this.authState !== null,
     };
   }
 
   private currentAccountUpdatedNotification(): AccountUpdatedNotification {
     return {
-      authMode: this.authState?.mode ?? null,
+      authMode: this.effectiveAuthMode,
       planType: this.authState?.mode === "chatgptAuthTokens" ? this.authState.planType : null,
     };
   }
@@ -1374,7 +1407,7 @@ export class AppServerConnection {
   private async handleModelList(): Promise<ModelListResponse> {
     const models = this.backend ? await this.backend.listModels() : [];
 
-    return {
+    const response: ModelListResponse = {
       data: models.map((model) => ({
         id: model.id,
         model: model.model,
@@ -1392,6 +1425,16 @@ export class AppServerConnection {
       })),
       nextCursor: null,
     };
+
+    void this.debugLogWriter?.write({
+      at: new Date().toISOString(),
+      component: "app-server",
+      kind: "backend-event",
+      method: "model/list",
+      payload: response,
+    });
+
+    return response;
   }
 
   private async handleThreadStart(params: unknown): Promise<ThreadStartResponse> {
@@ -1410,15 +1453,8 @@ export class AppServerConnection {
       gitInfo: null,
     });
 
-    this.threadRuntimes.set(entry.threadId, {
-      sessionId,
-      status: "ready",
-      activeTurnId: null,
-      latestTurnId: null,
-      machine: null,
-      subscription: null,
-      eventQueue: Promise.resolve(),
-    });
+    const runtime = this.initRuntime(entry.threadId, sessionId);
+    this.transitionToReady(entry.threadId, runtime);
 
     const thread = this.buildThread(entry, []);
     await this.publish("thread/started", { thread }, entry.threadId);
@@ -1437,30 +1473,38 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
-    const sessionId = await backend.resumeSession(entry.backendSessionId);
-    if (parsed.model) {
-      await backend.setModel(sessionId, parsed.model);
+    const existing = this.threadRuntimes.get(parsed.threadId);
+    if (existing) {
+      throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
     }
-    this.threadRuntimes.set(entry.threadId, {
-      sessionId,
-      status: "ready",
-      activeTurnId: null,
-      latestTurnId: null,
-      machine: null,
-      subscription: null,
-      eventQueue: Promise.resolve(),
-    });
-    const history = await backend.readSessionHistory(sessionId);
-    const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
-    await this.publishThreadStatus(entry.threadId);
-    return await this.buildThreadExecutionResponse(
-      thread,
-      parsed.model ?? null,
-      parsed.cwd ?? null,
-      parsed.approvalPolicy ?? null,
-      parsed.approvalsReviewer ?? null,
-      parsed.sandbox ?? null
-    );
+
+    const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
+
+    try {
+      const sessionId = await backend.resumeSession(entry.backendSessionId);
+      if (parsed.model) {
+        await backend.setModel(sessionId, parsed.model);
+      }
+      runtime.sessionId = sessionId;
+
+      const history = await backend.readSessionHistory(sessionId);
+      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
+      this.transitionToReady(parsed.threadId, runtime);
+      await this.publishThreadStatus(parsed.threadId);
+      return await this.buildThreadExecutionResponse(
+        thread,
+        parsed.model ?? null,
+        parsed.cwd ?? null,
+        parsed.approvalPolicy ?? null,
+        parsed.approvalsReviewer ?? null,
+        parsed.sandbox ?? null
+      );
+    } catch (error) {
+      runtime.status = "terminating";
+      runtime.readyResolver?.();
+      this.threadRuntimes.delete(parsed.threadId);
+      throw error;
+    }
   }
 
   private async handleThreadFork(params: unknown): Promise<ThreadForkResponse> {
@@ -1468,44 +1512,58 @@ export class AppServerConnection {
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
     const sourceRuntime = this.threadRuntimes.get(parsed.threadId);
-    if (sourceRuntime && sourceRuntime.status === "turn_active") {
-      throw new Error(`Cannot fork thread ${parsed.threadId} while a turn is active`);
+    if (sourceRuntime && sourceRuntime.status !== "ready") {
+      throw new Error(`Cannot fork thread ${parsed.threadId} (status: ${sourceRuntime.status})`);
     }
-    const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
-    if (parsed.model) {
-      await backend.setModel(sessionId, parsed.model);
-    }
-    const entry = await this.threadRegistry.create({
-      backendSessionId: sessionId,
-      backendType: sourceEntry.backendType,
-      cwd: parsed.cwd ?? sourceEntry.cwd,
-      preview: sourceEntry.preview,
-      modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
-      name: sourceEntry.name,
-      gitInfo: sourceEntry.gitInfo,
-    });
 
-    this.threadRuntimes.set(entry.threadId, {
-      sessionId,
-      status: "ready",
-      activeTurnId: null,
-      latestTurnId: null,
-      machine: null,
-      subscription: null,
-      eventQueue: Promise.resolve(),
-    });
-    const history = await backend.readSessionHistory(sessionId);
-    const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
-    await this.publish("thread/started", { thread }, entry.threadId);
-    await this.publishThreadStatus(entry.threadId);
-    return await this.buildThreadExecutionResponse(
-      thread,
-      parsed.model ?? null,
-      parsed.cwd ?? null,
-      parsed.approvalPolicy ?? null,
-      parsed.approvalsReviewer ?? null,
-      parsed.sandbox ?? null
-    );
+    if (sourceRuntime) {
+      sourceRuntime.status = "forking";
+      this.logTransition(parsed.threadId, "ready", "forking");
+    }
+
+    let forkThreadId: string | null = null;
+    try {
+      const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
+      if (parsed.model) {
+        await backend.setModel(sessionId, parsed.model);
+      }
+      const entry = await this.threadRegistry.create({
+        backendSessionId: sessionId,
+        backendType: sourceEntry.backendType,
+        cwd: parsed.cwd ?? sourceEntry.cwd,
+        preview: sourceEntry.preview,
+        modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
+        name: sourceEntry.name,
+        gitInfo: sourceEntry.gitInfo,
+      });
+
+      forkThreadId = entry.threadId;
+      const forkRuntime = this.initRuntime(entry.threadId, sessionId);
+      this.transitionToReady(entry.threadId, forkRuntime);
+
+      const history = await backend.readSessionHistory(sessionId);
+      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
+      await this.publish("thread/started", { thread }, entry.threadId);
+      await this.publishThreadStatus(entry.threadId);
+      return await this.buildThreadExecutionResponse(
+        thread,
+        parsed.model ?? null,
+        parsed.cwd ?? null,
+        parsed.approvalPolicy ?? null,
+        parsed.approvalsReviewer ?? null,
+        parsed.sandbox ?? null
+      );
+    } catch (error) {
+      if (forkThreadId) {
+        this.threadRuntimes.delete(forkThreadId);
+      }
+      throw error;
+    } finally {
+      if (sourceRuntime && sourceRuntime.status === "forking") {
+        sourceRuntime.status = "ready";
+        this.logTransition(parsed.threadId, "forking", "ready");
+      }
+    }
   }
 
   private async handleThreadRead(params: unknown): Promise<ThreadReadResponse> {
@@ -1608,9 +1666,17 @@ export class AppServerConnection {
     const parsed = params as ThreadArchiveParams;
     const entry = await this.getThreadEntry(parsed.threadId);
     const runtime = this.threadRuntimes.get(parsed.threadId);
+    if (runtime) {
+      const from = runtime.status;
+      runtime.status = "terminating";
+      runtime.readyResolver?.();
+      runtime.readyResolver = null;
+      runtime.readyPromise = null;
+      this.logTransition(parsed.threadId, from, "terminating");
+    }
     runtime?.subscription?.dispose();
-    this.threadRuntimes.delete(parsed.threadId);
     await backend.disposeSession(entry.backendSessionId);
+    this.threadRuntimes.delete(parsed.threadId);
     await this.threadRegistry.update(parsed.threadId, { archived: true });
     await this.publish("thread/archived", { threadId: parsed.threadId }, parsed.threadId);
     return {};
@@ -1647,8 +1713,8 @@ export class AppServerConnection {
   private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnStartParams;
+    const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
-    const runtime = this.getReadyThreadRuntime(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
     if (parsed.model) {
       await backend.setModel(runtime.sessionId, parsed.model);
@@ -2004,15 +2070,58 @@ export class AppServerConnection {
     );
   }
 
-  private getReadyThreadRuntime(threadId: string): ThreadRuntime {
+  private async getReadyThreadRuntime(threadId: string): Promise<ThreadRuntime> {
     const runtime = this.threadRuntimes.get(threadId);
     if (!runtime) {
       throw new Error(`Thread ${threadId} is not loaded`);
     }
+    if (runtime.status === "starting" && runtime.readyPromise) {
+      await runtime.readyPromise;
+    }
     if (runtime.status !== "ready") {
-      throw new Error(`Thread ${threadId} is not ready`);
+      throw new Error(`Thread ${threadId} is not ready (status: ${runtime.status})`);
     }
     return runtime;
+  }
+
+  private initRuntime(threadId: string, sessionId: string): ThreadRuntime {
+    let readyResolver: (() => void) | null = null;
+    const readyPromise = new Promise<void>((resolve) => {
+      readyResolver = resolve;
+    });
+    const runtime: ThreadRuntime = {
+      sessionId,
+      status: "starting",
+      activeTurnId: null,
+      latestTurnId: null,
+      machine: null,
+      subscription: null,
+      eventQueue: Promise.resolve(),
+      readyResolver,
+      readyPromise,
+    };
+    this.threadRuntimes.set(threadId, runtime);
+    this.logTransition(threadId, "none", "starting");
+    return runtime;
+  }
+
+  private transitionToReady(threadId: string, runtime: ThreadRuntime): void {
+    const from = runtime.status;
+    runtime.status = "ready";
+    runtime.readyResolver?.();
+    runtime.readyResolver = null;
+    runtime.readyPromise = null;
+    this.logTransition(threadId, from, "ready");
+  }
+
+  private logTransition(threadId: string, from: string, to: string): void {
+    void this.debugLogWriter?.write({
+      at: new Date().toISOString(),
+      component: "app-server",
+      kind: "state-transition",
+      threadId,
+      payload: { from, to },
+    });
   }
 
   private async getThreadEntry(threadId: string): Promise<ThreadRegistryEntry> {
