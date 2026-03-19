@@ -883,7 +883,7 @@ export class AppServerConnection {
     string | number,
     PendingToolUserInputRequest
   >();
-  private authState: StoredAuthState | null = null;
+  private authState: StoredAuthState | null = { mode: "apikey", apiKey: "codapter" };
   private readonly state: ConnectionState = {
     initialized: false,
     initializedNotificationReceived: false,

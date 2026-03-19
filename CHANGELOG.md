@@ -13,3 +13,4 @@
 - Increased SIGTERM→SIGKILL grace period from 1s to 5s.
 - Removed unused declarations in pi-process.ts (parseModelKey, toImageContent, currentModelId, unnecessary async/await).
 - Extended per-thread state machine (`starting → ready → turn_active → forking → terminating`) with request buffering during `starting`, rejection during `forking`/`terminating`, and debug-level state transition logging.
+- Added smoke test coverage for all 11 design-spec scenarios (bash tool, file edit, multi-turn, model switching, thinking, session persistence, interrupt, fork, standalone shell, thread listing).

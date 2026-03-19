@@ -229,8 +229,8 @@ The adapter-owned thread registry is authoritative for all thread identity, meta
 - [x] `thread/name/set` → call `backend.setSessionName()`, update registry
 - [x] `thread/list` → read from thread registry (not backend), return paginated list
 - [x] `thread/archive` / `thread/unarchive` → update registry archive flag
-- [ ] Per-thread state machine: `starting → ready → turn_active → forking → terminating` — *Partial: only `ready` and `turn_active` implemented. See follow-up task 3.*
-- [ ] Request queue: buffer turn/start until thread state is `ready` — *Not implemented. See follow-up task 3.*
+- [x] Per-thread state machine: `starting → ready → turn_active → forking → terminating`
+- [x] Request queue: buffer turn/start until thread state is `ready`
 - [x] Thread title generation from first user message
 - [x] `thread/metadata/update` → update cwd/git info in thread registry
 - [x] `thread/loaded/list` → return list of currently loaded (process-active) threads
@@ -238,8 +238,8 @@ The adapter-owned thread registry is authoritative for all thread identity, meta
 - [x] Token usage: emit `thread/tokenUsage/updated` from Pi `get_session_stats` on turn completion
 - [x] Stale event gating: ignore late Pi events that arrive after a turn has been completed/interrupted (compare turnId)
 - [x] Unit tests: each method with mock backend
-- [ ] Unit tests: state machine transitions — *Blocked on task 3*
-- [ ] Unit tests: request buffering during `starting` state — *Blocked on task 3*
+- [x] Unit tests: state machine transitions
+- [x] Unit tests: request buffering during `starting` state
 - [ ] Unit tests: idle timeout eviction doesn't race with incoming turn/start — *Not tested*
 
 **Done when**: Threads appear in Codex Desktop sidebar, can be created/resumed/forked.
@@ -388,16 +388,16 @@ Tasks:
 ### 6.3 Smoke Test Suite (automated)
 - [x] Smoke test: basic conversation (2+2)
 - [x] Smoke test: bash tool call
-- [ ] Smoke test: file create/edit — *See follow-up task 7*
-- [ ] Smoke test: multi-turn context — *See follow-up task 7*
-- [ ] Smoke test: model switching — *See follow-up task 7*
-- [ ] Smoke test: thinking display — *See follow-up task 7*
-- [ ] Smoke test: session persistence — *See follow-up task 7*
-- [ ] Smoke test: interrupt — *See follow-up task 7*
-- [ ] Smoke test: fork — *See follow-up task 7*
-- [ ] Smoke test: standalone shell — *See follow-up task 7*
-- [ ] Smoke test: thread listing — *See follow-up task 7*
-- [ ] All smoke tests pass with `npm run test:smoke`
+- [x] Smoke test: file create/edit
+- [x] Smoke test: multi-turn context
+- [x] Smoke test: model switching
+- [x] Smoke test: thinking display
+- [x] Smoke test: session persistence
+- [x] Smoke test: interrupt
+- [x] Smoke test: fork
+- [x] Smoke test: standalone shell
+- [x] Smoke test: thread listing
+- [x] All smoke tests pass with `PI_SMOKE_TEST=1 npm run test:smoke`
 
 ### 6.4 Documentation & Release
 - [x] Complete `docs/api-mapping.md` (validated against real GUI)
