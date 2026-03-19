@@ -52,7 +52,7 @@ graph TB
 git clone <repo-url> codapter
 cd codapter
 npm install
-npm run build
+npm run build:dist
 ```
 
 ### Run Locally
@@ -86,7 +86,7 @@ node dist/codapter.mjs app-server \
 
 ```bash
 npm run build:dist
-# Creates dist/codapter.mjs — a single-file bundled executable
+# Builds all packages and creates dist/codapter.mjs
 ```
 
 ## Architecture
@@ -428,8 +428,11 @@ codapter/
 # Install dependencies
 npm install
 
-# Build all packages
+# Build all packages (TypeScript outputs only)
 npm run build
+
+# Build the runnable single-file bundle
+npm run build:dist
 
 # Run tests
 npm run test
@@ -439,9 +442,6 @@ npm run lint
 
 # Full check (build + lint + test)
 npm run check
-
-# Build distribution binary
-npm run build:dist
 
 # Run smoke tests (requires Pi with API keys)
 PI_SMOKE_TEST=1 npm run test:smoke
