@@ -1467,6 +1467,10 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
+    const sourceRuntime = this.threadRuntimes.get(parsed.threadId);
+    if (sourceRuntime && sourceRuntime.status === "turn_active") {
+      throw new Error(`Cannot fork thread ${parsed.threadId} while a turn is active`);
+    }
     const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
     if (parsed.model) {
       await backend.setModel(sessionId, parsed.model);
