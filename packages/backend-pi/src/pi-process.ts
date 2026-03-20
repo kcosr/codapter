@@ -769,6 +769,13 @@ export class PiProcessSession {
         return;
       case "tool_execution_start":
         if (!isToolExecutionStartEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_start",
+            raw: JSON.stringify(event),
+          });
           return;
         }
         this.emit({
@@ -782,6 +789,13 @@ export class PiProcessSession {
         return;
       case "tool_execution_update":
         if (!isToolExecutionUpdateEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_update",
+            raw: JSON.stringify(event),
+          });
           return;
         }
         this.emit({
@@ -796,6 +810,13 @@ export class PiProcessSession {
         return;
       case "tool_execution_end":
         if (!isToolExecutionEndEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_end",
+            raw: JSON.stringify(event),
+          });
           return;
         }
         this.emit({

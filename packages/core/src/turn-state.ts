@@ -247,17 +247,18 @@ export class TurnStateMachine {
   ): Promise<void> {
     const id = randomUUID();
     const kind = classifyToolName(toolName);
+    const command = inferCommand(input);
     const item: ThreadItem =
       kind === "commandExecution"
         ? {
             type: "commandExecution",
             id,
-            command: inferCommand(input),
+            command,
             cwd: this.cwd,
             processId: null,
             source: "agent",
             status: "inProgress",
-            commandActions: inferCommandActions(inferCommand(input)),
+            commandActions: inferCommandActions(command),
             aggregatedOutput: null,
             exitCode: null,
             durationMs: null,

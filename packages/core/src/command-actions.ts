@@ -40,12 +40,17 @@ function splitCommandSegments(command: string): string[] {
       continue;
     }
 
-    if (char === ";" || (char === "|" && next !== "|") || (char === "&" && next === "&")) {
+    if (
+      char === ";" ||
+      (char === "|" && next !== "|") ||
+      (char === "|" && next === "|") ||
+      (char === "&" && next === "&")
+    ) {
       if (current.trim().length > 0) {
         segments.push(current.trim());
       }
       current = "";
-      if (char === "&") {
+      if ((char === "|" && next === "|") || (char === "&" && next === "&")) {
         index += 1;
       }
       continue;

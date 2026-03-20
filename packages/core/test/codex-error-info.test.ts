@@ -18,6 +18,18 @@ describe("classifyCodexErrorInfo", () => {
     });
   });
 
+  it("classifies additional vendored variants without false-positive http codes", () => {
+    expect(classifyCodexErrorInfo("usage limit exceeded for this workspace")).toBe(
+      "usageLimitExceeded"
+    );
+    expect(classifyCodexErrorInfo("thread rollback failed after conflict")).toBe(
+      "threadRollbackFailed"
+    );
+    expect(classifyCodexErrorInfo("connection reset after 500ms")).toEqual({
+      httpConnectionFailed: { httpStatusCode: null },
+    });
+  });
+
   it("falls back to other for uncategorized errors", () => {
     expect(classifyCodexErrorInfo("something unexpected happened")).toBe("other");
   });

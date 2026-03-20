@@ -19,6 +19,15 @@ describe("inferCommandActions", () => {
       { type: "read", command: "cat README.md", name: "cat", path: "README.md" },
       { type: "search", command: "rg install docs", query: "install", path: "docs" },
     ]);
+    expect(inferCommandActions('grep "hello world" notes.txt || ls docs')).toEqual([
+      {
+        type: "search",
+        command: 'grep "hello world" notes.txt',
+        query: "hello world",
+        path: "notes.txt",
+      },
+      { type: "listFiles", command: "ls docs", path: "docs" },
+    ]);
   });
 
   it("falls back to unknown for unsupported commands", () => {
