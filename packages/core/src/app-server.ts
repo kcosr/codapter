@@ -171,6 +171,10 @@ interface PendingToolUserInputRequest {
   reject(error: unknown): void;
 }
 
+type TextElements = Extract<UserInput, { type: "text" }>["text_elements"];
+type FileUpdateChange = Extract<ThreadItem, { type: "fileChange" }>["changes"][number];
+type PatchChangeKind = FileUpdateChange["kind"];
+
 type StoredAuthState =
   | { mode: "apikey"; apiKey: string }
   | {
@@ -411,7 +415,7 @@ function toJsonValueArray(value: unknown): JsonValue[] {
   return [{ type: "text", text }];
 }
 
-function toTextElements(value: unknown): Extract<UserInput, { type: "text" }>["text_elements"] {
+function toTextElements(value: unknown): TextElements {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -581,14 +585,7 @@ function textContentFromBlocks(blocks: readonly JsonValue[]): string {
     .join("");
 }
 
-function toPatchChangeKind(
-  value: unknown
-):
-  | Extract<
-      Extract<ThreadItem, { type: "fileChange" }>["changes"][number],
-      { kind: unknown }
-    >["kind"]
-  | null {
+function toPatchChangeKind(value: unknown): PatchChangeKind | null {
   if (!isRecord(value) || typeof value.type !== "string") {
     return null;
   }
@@ -599,12 +596,7 @@ function toPatchChangeKind(
     case "delete":
       return { type: "delete" };
     case "update": {
-      const movePath =
-        typeof value.move_path === "string"
-          ? value.move_path
-          : typeof value.movePath === "string"
-            ? value.movePath
-            : null;
+      const movePath = typeof value.move_path === "string" ? value.move_path : null;
       return { type: "update", move_path: movePath };
     }
     default:
@@ -612,9 +604,7 @@ function toPatchChangeKind(
   }
 }
 
-function toFileUpdateChange(
-  value: unknown
-): Extract<ThreadItem, { type: "fileChange" }>["changes"][number] | null {
+function toFileUpdateChange(value: unknown): FileUpdateChange | null {
   if (!isRecord(value) || typeof value.path !== "string" || typeof value.diff !== "string") {
     return null;
   }
@@ -631,9 +621,7 @@ function toFileUpdateChange(
   };
 }
 
-function fileUpdateChangesFromUnknown(
-  value: unknown
-): Extract<ThreadItem, { type: "fileChange" }>["changes"] {
+function fileUpdateChangesFromUnknown(value: unknown): FileUpdateChange[] {
   const candidate = isRecord(value) && Array.isArray(value.changes) ? value.changes : value;
   if (!Array.isArray(candidate)) {
     return [];

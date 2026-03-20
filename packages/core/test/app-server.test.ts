@@ -1533,6 +1533,13 @@ describe("AppServerConnection", () => {
       ]);
       expect(outgoing.some((message) => message.method === "serverRequest/resolved")).toBe(true);
       expect(outgoing.some((message) => message.method === "turn/completed")).toBe(true);
+      expect(
+        outgoing.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            (message.params as { status?: { type?: string } } | undefined)?.status?.type === "idle"
+        )
+      ).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -306,6 +306,7 @@ Follow-on implementation notes:
 
 - Upstream Codex `ThreadItem` at the pinned commit now requires `agentMessage.memoryCitation` and `commandExecution.source`; the adapter now emits those fields directly instead of preserving reduced local variants.
 - Thread runtime states such as `starting`, `forking`, and `terminating` remain adapter-owned internally, but the published protocol surface now maps them to the upstream `ThreadStatus` union without custom active-flag values.
+- During normal active turn execution, published `ThreadStatus` now uses `activeFlags: []`; only upstream-supported flags such as `waitingOnUserInput` are surfaced externally.
 - Historical inline image inputs are normalized to vendored `UserInput` image URLs using `data:` URLs when only base64 payloads are available.
 
 ## Milestone 6: External Review Of Code Changes

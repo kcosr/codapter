@@ -13,6 +13,9 @@ interface ToolState {
   startedAt: number;
 }
 
+type FileUpdateChange = Extract<ThreadItem, { type: "fileChange" }>["changes"][number];
+type PatchChangeKind = FileUpdateChange["kind"];
+
 function textFromUnknown(value: unknown): string {
   if (typeof value === "string") {
     return value;
@@ -63,6 +66,64 @@ function toolOutputText(output: unknown): string {
   }
 
   return textFromUnknown(output);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toPatchChangeKind(value: unknown): PatchChangeKind | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+
+  switch (value.type) {
+    case "add":
+      return { type: "add" };
+    case "delete":
+      return { type: "delete" };
+    case "update":
+      return {
+        type: "update",
+        move_path: typeof value.move_path === "string" ? value.move_path : null,
+      };
+    default:
+      return null;
+  }
+}
+
+function toFileUpdateChange(value: unknown): FileUpdateChange | null {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.diff !== "string") {
+    return null;
+  }
+
+  const kind = toPatchChangeKind(value.kind);
+  if (!kind) {
+    return null;
+  }
+
+  return {
+    path: value.path,
+    kind,
+    diff: value.diff,
+  };
+}
+
+function toFileUpdateChanges(value: unknown): FileUpdateChange[] {
+  const candidate =
+    isRecord(value) && Array.isArray(value.changes)
+      ? value.changes
+      : isRecord(value) && Array.isArray(value.content)
+        ? value.content
+        : value;
+  if (!Array.isArray(candidate)) {
+    return [];
+  }
+
+  return candidate.flatMap((entry) => {
+    const change = toFileUpdateChange(entry);
+    return change ? [change] : [];
+  });
 }
 
 function toolItemKind(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
@@ -263,6 +324,10 @@ export class TurnStateMachine {
     }
 
     if (state.item.type === "fileChange") {
+      const changes = toFileUpdateChanges(output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
       await this.sink.notify("item/fileChange/outputDelta", {
         threadId: this.threadId,
         turnId: this.turn.id,
@@ -306,6 +371,10 @@ export class TurnStateMachine {
     }
 
     if (state.item.type === "fileChange") {
+      const changes = toFileUpdateChanges(output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
       state.item.status = isError ? "failed" : "completed";
     }
 

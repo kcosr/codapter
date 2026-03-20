@@ -47,4 +47,59 @@ describe("TurnStateMachine", () => {
       status: "failed",
     });
   });
+
+  it("captures vendored file changes from tool output", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_file",
+      toolName: "file_edit",
+      input: { path: "main.ts" },
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_file",
+      toolName: "file_edit",
+      output: {
+        content: [
+          {
+            path: "main.ts",
+            kind: { type: "update", move_path: null },
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+          },
+        ],
+      },
+      isError: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      status: "completed",
+      items: [
+        {
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "main.ts",
+              kind: { type: "update", move_path: null },
+              diff: "@@ -1 +1 @@\n-old\n+new\n",
+            },
+          ],
+        },
+      ],
+    });
+  });
 });
