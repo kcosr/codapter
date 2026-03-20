@@ -1291,6 +1291,146 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("keeps other loaded threads usable when one thread enters systemError", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const crashTexts = new Set(["crash"]);
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      queueMicrotask(() => {
+        if (crashTexts.has(text)) {
+          backend.emit(sessionId, {
+            type: "error",
+            sessionId,
+            turnId,
+            message: "Pi process exited with code 13",
+            fatal: true,
+          });
+          return;
+        }
+
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: `ok:${text}`,
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage(message) {
+        if ("method" in message) {
+          notifications.push(message);
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const firstStarted = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const secondStarted = (await connection.handleMessage({
+        id: 3,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const crashedThreadId = firstStarted.result.thread.id;
+      const healthyThreadId = secondStarted.result.thread.id;
+
+      await connection.handleMessage({
+        id: 4,
+        method: "turn/start",
+        params: {
+          threadId: crashedThreadId,
+          input: [{ type: "text", text: "crash", text_elements: [] }],
+        },
+      });
+      await connection.handleMessage({
+        id: 5,
+        method: "turn/start",
+        params: {
+          threadId: healthyThreadId,
+          input: [{ type: "text", text: "healthy", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            (message.params as { threadId?: string; status?: unknown } | undefined)?.threadId ===
+              crashedThreadId &&
+            JSON.stringify((message.params as { status?: unknown }).status) ===
+              JSON.stringify({ type: "systemError" })
+        )
+      ).toBe(true);
+
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "turn/completed" &&
+            (message.params as { threadId?: string; turn?: { status?: string } } | undefined)
+              ?.threadId === healthyThreadId &&
+            (message.params as { turn?: { status?: string } }).turn?.status === "completed"
+        )
+      ).toBe(true);
+
+      const listed = await connection.handleMessage({
+        id: 6,
+        method: "thread/list",
+        params: {},
+      });
+      expect(listed).toMatchObject({
+        id: 6,
+        result: {
+          data: expect.arrayContaining([
+            expect.objectContaining({
+              id: crashedThreadId,
+              status: { type: "systemError" },
+            }),
+            expect.objectContaining({
+              id: healthyThreadId,
+              status: { type: "idle" },
+            }),
+          ]),
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves backend event order when item startup notifications are slow", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
