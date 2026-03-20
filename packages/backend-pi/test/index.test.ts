@@ -539,6 +539,7 @@ describe("PiBackend", () => {
         type: "error",
         turnId: "turn_crash",
         message: "Pi process exited with code 13",
+        fatal: true,
       });
 
       subscription.dispose();

@@ -155,7 +155,7 @@ interface ConnectionState {
 
 interface ThreadRuntime {
   sessionId: string;
-  status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
+  status: "starting" | "ready" | "turn_active" | "forking" | "terminating" | "system_error";
   activeTurnId: string | null;
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
@@ -860,6 +860,10 @@ function runtimeToThreadStatus(
 ): ThreadStatus {
   if (!runtime) {
     return { type: "notLoaded" };
+  }
+
+  if (runtime.status === "system_error") {
+    return { type: "systemError" };
   }
 
   if (runtime.status === "ready") {
@@ -1627,8 +1631,12 @@ export class AppServerConnection {
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
     const existing = this.threadRuntimes.get(parsed.threadId);
-    if (existing) {
+    if (existing && existing.status !== "system_error") {
       throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
+    }
+    if (existing?.status === "system_error") {
+      existing.subscription?.dispose();
+      this.threadRuntimes.delete(parsed.threadId);
     }
 
     const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
@@ -1641,8 +1649,10 @@ export class AppServerConnection {
       runtime.sessionId = sessionId;
 
       const history = await backend.readSessionHistory(sessionId);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       this.transitionToReady(parsed.threadId, runtime);
+      // Build the returned thread after the runtime becomes ready so the payload
+      // reflects the post-resume protocol status instead of transient "active".
+      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1665,13 +1675,20 @@ export class AppServerConnection {
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
     const sourceRuntime = this.threadRuntimes.get(parsed.threadId);
-    if (sourceRuntime && sourceRuntime.status !== "ready") {
+    if (
+      sourceRuntime &&
+      sourceRuntime.status !== "ready" &&
+      sourceRuntime.status !== "system_error"
+    ) {
       throw new Error(`Cannot fork thread ${parsed.threadId} (status: ${sourceRuntime.status})`);
     }
 
-    if (sourceRuntime) {
+    if (sourceRuntime?.status === "ready") {
       sourceRuntime.status = "forking";
       this.logTransition(parsed.threadId, "ready", "forking");
+    } else if (sourceRuntime?.status === "system_error") {
+      sourceRuntime.subscription?.dispose();
+      sourceRuntime.subscription = null;
     }
 
     let forkThreadId: string | null = null;
@@ -1692,9 +1709,10 @@ export class AppServerConnection {
 
       forkThreadId = entry.threadId;
       const forkRuntime = this.initRuntime(entry.threadId, sessionId);
-      this.transitionToReady(entry.threadId, forkRuntime);
-
       const history = await backend.readSessionHistory(sessionId);
+      this.transitionToReady(entry.threadId, forkRuntime);
+      // Build the returned thread after the runtime becomes ready so the payload
+      // reflects the post-fork protocol status instead of transient "active".
       const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       await this.publish("thread/started", { thread }, entry.threadId);
       await this.publishThreadStatus(entry.threadId);
@@ -2039,7 +2057,7 @@ export class AppServerConnection {
 
     const completedTurn = await machine.handleEvent(event);
     if (completedTurn) {
-      await this.finishTurn(threadId, turnId);
+      await this.finishTurn(threadId, turnId, event.type === "error" && event.fatal);
     }
   }
 
@@ -2115,14 +2133,14 @@ export class AppServerConnection {
     );
   }
 
-  private async finishTurn(threadId: string, turnId: string): Promise<void> {
+  private async finishTurn(threadId: string, turnId: string, systemError = false): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
     if (!runtime || runtime.activeTurnId !== turnId) {
       return;
     }
     runtime.machine = null;
     runtime.activeTurnId = null;
-    runtime.status = "ready";
+    runtime.status = systemError ? "system_error" : "ready";
     await this.publishThreadStatus(threadId);
   }
 

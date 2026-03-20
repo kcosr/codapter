@@ -677,6 +677,7 @@ export class PiProcessSession {
           turnId: this.currentTurnId,
           type: "error",
           message: error.message,
+          fatal: true,
         });
       }
       for (const pending of this.pending.values()) {

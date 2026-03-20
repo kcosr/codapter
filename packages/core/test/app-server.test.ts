@@ -1018,6 +1018,279 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("marks the thread as systemError on fatal backend failure and allows resume recovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    let promptCount = 0;
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      promptCount += 1;
+      queueMicrotask(() => {
+        if (promptCount === 1) {
+          backend.emit(sessionId, {
+            type: "error",
+            sessionId,
+            turnId,
+            message: "Pi process exited with code 13",
+            fatal: true,
+          });
+          return;
+        }
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "recovered",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage(message) {
+        if ("method" in message) {
+          notifications.push(message);
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "crash", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            JSON.stringify((message.params as { status?: unknown } | undefined)?.status) ===
+              JSON.stringify({ type: "systemError" })
+        )
+      ).toBe(true);
+
+      const readAfterCrash = await connection.handleMessage({
+        id: 4,
+        method: "thread/read",
+        params: {
+          threadId,
+          includeTurns: false,
+        },
+      });
+      expect(readAfterCrash).toMatchObject({
+        id: 4,
+        result: {
+          thread: {
+            status: { type: "systemError" },
+          },
+        },
+      });
+
+      const resumed = await connection.handleMessage({
+        id: 5,
+        method: "thread/resume",
+        params: {
+          threadId,
+          persistExtendedHistory: false,
+        },
+      });
+      expect(resumed).toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            status: { type: "idle" },
+          },
+        },
+      });
+
+      const restarted = await connection.handleMessage({
+        id: 6,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "retry", text_elements: [] }],
+        },
+      });
+      expect(restarted).toMatchObject({
+        id: 6,
+        result: {
+          turn: {
+            status: "inProgress",
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "turn/completed" &&
+            (message.params as { turn?: { status?: string } } | undefined)?.turn?.status ===
+              "completed"
+        )
+      ).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("allows thread/fork from a systemError source thread using persisted state", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    let promptCount = 0;
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      promptCount += 1;
+      queueMicrotask(() => {
+        if (promptCount === 1) {
+          backend.emit(sessionId, {
+            type: "error",
+            sessionId,
+            turnId,
+            message: "Pi process exited with code 13",
+            fatal: true,
+          });
+          return;
+        }
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "fork recovered",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const sourceThreadId = started.result.thread.id;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: sourceThreadId,
+          input: [{ type: "text", text: "crash", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const forked = await connection.handleMessage({
+        id: 4,
+        method: "thread/fork",
+        params: {
+          threadId: sourceThreadId,
+          persistExtendedHistory: false,
+        },
+      });
+      const forkThreadId = (forked as { result?: { thread?: { id?: string } } }).result?.thread?.id;
+
+      expect(forked).toMatchObject({
+        id: 4,
+        result: {
+          thread: {
+            id: expect.any(String),
+            status: { type: "idle" },
+          },
+        },
+      });
+      if (!forkThreadId) {
+        throw new Error("Expected a forked thread id");
+      }
+      expect(forkThreadId).not.toBe(sourceThreadId);
+
+      const sourceRead = await connection.handleMessage({
+        id: 5,
+        method: "thread/read",
+        params: {
+          threadId: sourceThreadId,
+          includeTurns: false,
+        },
+      });
+      expect(sourceRead).toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            status: { type: "systemError" },
+          },
+        },
+      });
+
+      await connection.handleMessage({
+        id: 6,
+        method: "turn/start",
+        params: {
+          threadId: forkThreadId,
+          input: [{ type: "text", text: "retry", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves backend event order when item startup notifications are slow", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));

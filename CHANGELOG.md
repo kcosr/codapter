@@ -44,6 +44,7 @@
 - Preserved PI assistant `stopReason` and `errorMessage` in normalized history, reconstructed failed historical turns in core, inferred vendored `commandActions`, and classified turn failures into vendored `CodexErrorInfo` variants.
 - Enriched normalized live tool events with `toolKind` and update-time `input`, allowing `TurnStateMachine` to recover missing tool starts from backend metadata instead of empty placeholders.
 - Propagated PI subprocess exits during active turns as backend error events and taught `turn/start` to return the finalized failed turn when startup both emits a turn error and rejects the prompt request.
+- Fatal backend turn failures now publish vendored `ThreadStatus.systemError`, both `thread/resume` and `thread/fork` can recover from persisted state after those crashes, and successful resume/fork responses no longer transiently report `active` while the runtime is already ready.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.

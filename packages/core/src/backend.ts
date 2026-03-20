@@ -108,6 +108,8 @@ export interface BackendMessageEndEvent extends BackendBaseEvent {
 export interface BackendErrorEvent extends BackendBaseEvent {
   readonly type: "error";
   readonly message: string;
+  /** Set when the backend session/process is no longer usable for the current loaded thread. */
+  readonly fatal?: boolean;
 }
 
 export interface BackendElicitationRequestEvent extends BackendBaseEvent {

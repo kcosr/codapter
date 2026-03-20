@@ -297,6 +297,10 @@ Validation note:
 - [x] Enrich normalized live tool events with backend-provided `toolKind` and update-time `input` so turn-state recovery uses adapter metadata instead of empty fallbacks
 - [x] Propagate PI subprocess exits during active turns as backend `error` events so core finalizes failed turns instead of hanging live state
 - [x] When prompt startup fails after a turn-level error is already emitted, return the finalized failed turn instead of layering an extra RPC error over the same failure
+- [x] Surface fatal backend turn failures as vendored `ThreadStatus.systemError`
+- [x] Allow `thread/resume` to recover loaded threads that are stuck in adapter `system_error` state after a fatal backend failure
+- [x] Allow `thread/fork` from a loaded `system_error` source thread by rebuilding backend state from persisted session data
+- [x] Ensure `thread/resume` and `thread/fork` responses are built after the runtime transitions to ready so returned thread status matches the actual post-call state
 
 ### F.4 Validation
 
@@ -324,6 +328,10 @@ Follow-on implementation notes:
 - The adapter-owned `BackendToolUpdateEvent` now carries optional `input` and `toolKind`, and PI populates those fields so live recovery paths do not degrade to empty synthetic tool starts.
 - PI subprocess exits now surface through the normalized backend event stream as turn-scoped `error` events, allowing core to complete the active turn deterministically.
 - `turn/start` now preserves the graceful failed-turn result when the backend both emits a turn error and rejects the prompt request during startup, while still throwing on unrelated startup failures that never finalized the turn.
+- Fatal backend errors now map to published vendored `ThreadStatus.systemError` instead of incorrectly falling back to `idle`.
+- `thread/resume` can now tear down a loaded `system_error` runtime and reattach to persisted backend state, which gives the crashed-thread path an explicit recovery route.
+- `thread/fork` now accepts a loaded `system_error` source thread and relies on the backend's persisted-session recovery path instead of rejecting the operation outright.
+- `thread/resume` and `thread/fork` now build their returned `thread` payloads after transitioning internal runtime state to ready, avoiding stale `"active"` statuses in otherwise successful responses.
 
 ## Milestone 6: External Review Of Code Changes
 
@@ -341,6 +349,17 @@ Review notes for the latest follow-on change:
 - PI review flagged the double-path startup failure case where an emitted backend error and a rejected `prompt()` could produce both `turn/completed` and an RPC error. Fixed by returning the already-finalized failed turn when the turn is no longer in progress.
 - Gemini review first failed because the reviewer could not inspect the diff without an inline patch; reran with the patch text included.
 - Gemini then flagged that the new `turn/start` catch path had removed the final fallback `throw`. Fixed by restoring the throw for any startup error that did not actually finalize the turn.
+- Gemini review found no blocking issues on the status/recovery slice after the fatal-status changes landed.
+- PI review flagged three non-blocking concerns:
+  - add a note/comment explaining why resume/fork build thread payloads after `transitionToReady`
+  - consider fork behavior from `system_error`
+  - keep negative-path coverage in mind for future cleanup
+- Accepted fixes from that review:
+  - added inline comments for the ready-before-build ordering
+  - implemented and tested `thread/fork` from a loaded `system_error` source thread
+  - disposed stale `system_error` source subscriptions before forking and documented the shared `fatal` backend-error contract
+- Explicit deferrals from that review:
+  - no extra negative-path coverage was added beyond the existing non-fatal error regression test and the new system-error resume/fork tests
 
 **Done when**: both external reviews have been completed on the implementation, and accepted findings are either fixed or explicitly deferred.
 
