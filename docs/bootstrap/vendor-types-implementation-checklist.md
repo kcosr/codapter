@@ -294,6 +294,7 @@ Validation note:
 - [x] Centralize live and historical tool classification behind one shared core helper
 - [x] Preserve assistant `stopReason` and `errorMessage` across the PI backend boundary so historical failed turns can be reconstructed accurately
 - [x] Classify turn failures into vendored `CodexErrorInfo` variants instead of always emitting `null`
+- [x] Enrich normalized live tool events with backend-provided `toolKind` and update-time `input` so turn-state recovery uses adapter metadata instead of empty fallbacks
 
 ### F.4 Validation
 
@@ -303,6 +304,7 @@ Validation note:
 - [x] Add direct unit coverage for interrupted in-flight tool items under the vendored item union
 - [x] Add direct unit coverage for reasoning/text streaming, command streaming, and unknown-tool fallback in `TurnStateMachine`
 - [x] Add direct unit coverage for command-action inference and Codex error classification helpers
+- [x] Add direct coverage for live tool-update recovery using backend-provided metadata
 - [x] Re-run `npm run vendor-types`
 - [x] Re-run `npm run lint`
 - [x] Re-run `npm run build`
@@ -317,6 +319,7 @@ Follow-on implementation notes:
 - During normal active turn execution, published `ThreadStatus` now uses `activeFlags: []`; only upstream-supported flags such as `waitingOnUserInput` are surfaced externally.
 - Historical inline image inputs are normalized to vendored `UserInput` image URLs using `data:` URLs when only base64 payloads are available.
 - PI history normalization now preserves assistant `stopReason`/`errorMessage`, allowing `thread/resume` to rebuild failed turns with vendored `TurnError.codexErrorInfo`.
+- The adapter-owned `BackendToolUpdateEvent` now carries optional `input` and `toolKind`, and PI populates those fields so live recovery paths do not degrade to empty synthetic tool starts.
 
 ## Milestone 6: External Review Of Code Changes
 

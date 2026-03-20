@@ -3,7 +3,7 @@ import type { BackendEvent, BackendTokenUsage } from "./backend.js";
 import { classifyCodexErrorInfo } from "./codex-error-info.js";
 import { inferCommandActions } from "./command-actions.js";
 import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
-import { classifyToolName } from "./tool-kind.js";
+import { type ToolItemKind, classifyToolName } from "./tool-kind.js";
 
 export interface TurnStateNotificationSink {
   notify(method: string, params: unknown): Promise<void>;
@@ -175,18 +175,20 @@ export class TurnStateMachine {
         await this.handleThinkingDelta(event.delta);
         return null;
       case "tool_start":
-        await this.handleToolStart(event.toolCallId, event.toolName, event.input);
+        await this.handleToolStart(event.toolCallId, event.toolName, event.input, event.toolKind);
         return null;
       case "tool_update":
         await this.handleToolUpdate(
           event.toolCallId,
           event.toolName,
+          event.input,
           event.output,
-          event.isCumulative
+          event.isCumulative,
+          event.toolKind
         );
         return null;
       case "tool_end":
-        await this.handleToolEnd(event.toolCallId, event.output, event.isError);
+        await this.handleToolEnd(event.toolCallId, event.output, event.isError, event.toolKind);
         return null;
       case "message_end":
         return await this.complete("completed", null);
@@ -243,10 +245,11 @@ export class TurnStateMachine {
   private async handleToolStart(
     toolCallId: string,
     toolName: string,
-    input: unknown
+    input: unknown,
+    toolKind?: ToolItemKind
   ): Promise<void> {
     const id = randomUUID();
-    const kind = classifyToolName(toolName);
+    const kind = toolKind ?? classifyToolName(toolName);
     const command = inferCommand(input);
     const item: ThreadItem =
       kind === "commandExecution"
@@ -290,13 +293,15 @@ export class TurnStateMachine {
   private async handleToolUpdate(
     toolCallId: string,
     toolName: string,
+    input: unknown,
     output: unknown,
-    isCumulative: boolean
+    isCumulative: boolean,
+    toolKind?: ToolItemKind
   ): Promise<void> {
     const state = this.toolStates.get(toolCallId);
     if (!state) {
-      await this.handleToolStart(toolCallId, toolName, {});
-      return this.handleToolUpdate(toolCallId, toolName, output, isCumulative);
+      await this.handleToolStart(toolCallId, toolName, input ?? {}, toolKind);
+      return this.handleToolUpdate(toolCallId, toolName, input, output, isCumulative, toolKind);
     }
 
     const next = toolOutputText(output);
@@ -347,7 +352,8 @@ export class TurnStateMachine {
   private async handleToolEnd(
     toolCallId: string,
     output: unknown,
-    isError: boolean
+    isError: boolean,
+    _toolKind?: ToolItemKind
   ): Promise<void> {
     const state = this.toolStates.get(toolCallId);
     if (!state) {

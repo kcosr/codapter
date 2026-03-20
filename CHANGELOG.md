@@ -42,6 +42,7 @@
 - Replaced local core `SessionSource`, `ThreadStatus`, `UserInput`, `ThreadItem`, `TurnStatus`, `TurnError`, `Turn`, and `Thread` protocol types with vendored Codex declarations and aligned adapter output to the upstream-required shapes.
 - Centralized tool-kind classification across historical and live turn reconstruction and expanded direct `TurnStateMachine` lifecycle coverage.
 - Preserved PI assistant `stopReason` and `errorMessage` in normalized history, reconstructed failed historical turns in core, inferred vendored `commandActions`, and classified turn failures into vendored `CodexErrorInfo` variants.
+- Enriched normalized live tool events with `toolKind` and update-time `input`, allowing `TurnStateMachine` to recover missing tool starts from backend metadata instead of empty placeholders.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.

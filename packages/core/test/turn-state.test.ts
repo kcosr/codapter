@@ -83,6 +83,7 @@ describe("TurnStateMachine", () => {
       turnId: "turn_1",
       toolCallId: "tool_cmd",
       toolName: "bash",
+      input: { command: ["pwd"] },
       output: { content: [{ type: "text", text: "/repo" }] },
       isCumulative: false,
     });
@@ -236,6 +237,7 @@ describe("TurnStateMachine", () => {
       turnId: "turn_1",
       toolCallId: "tool_unknown",
       toolName: "search_web",
+      input: {},
       output: { content: [{ type: "text", text: "result" }] },
       isCumulative: false,
     });
@@ -301,5 +303,50 @@ describe("TurnStateMachine", () => {
       ],
     });
     expect(sink.notifications.some((notification) => notification.method === "error")).toBe(true);
+  });
+
+  it("recovers a missing tool_start from update input metadata", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      toolKind: "commandExecution",
+      input: { command: ["git", "status"] },
+      output: { content: [{ type: "text", text: "On branch main" }] },
+      isCumulative: false,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      toolKind: "commandExecution",
+      output: { content: [{ type: "text", text: "On branch main" }] },
+      isError: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      items: [
+        {
+          type: "commandExecution",
+          command: "git status",
+          commandActions: [{ type: "unknown", command: "git status" }],
+          aggregatedOutput: "On branch main",
+        },
+      ],
+    });
   });
 });

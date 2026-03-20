@@ -379,6 +379,29 @@ describe("PiBackend", () => {
     expect(events.some((event) => event.type === "tool_start")).toBe(true);
     expect(events.some((event) => event.type === "tool_update")).toBe(true);
     expect(events.some((event) => event.type === "tool_end")).toBe(true);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_start",
+        toolName: "bash",
+        toolKind: "commandExecution",
+        input: { command: "echo hi" },
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_update",
+        toolName: "bash",
+        toolKind: "commandExecution",
+        input: { command: "echo hi" },
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_end",
+        toolName: "bash",
+        toolKind: "commandExecution",
+      })
+    );
     expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
     expect(
       events

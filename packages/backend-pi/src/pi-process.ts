@@ -9,6 +9,7 @@ import type {
   BackendModelSummary,
   BackendTokenUsage,
 } from "@codapter/core";
+import { classifyToolName } from "@codapter/core";
 import type { ImageContent as PiImageContent } from "../../../types/pi/packages/ai/src/types.js";
 import type {
   ToolExecutionEndEvent as VendoredToolExecutionEndEvent,
@@ -785,6 +786,7 @@ export class PiProcessSession {
           toolCallId: event.toolCallId,
           toolName: event.toolName,
           input: event.args,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "tool_execution_update":
@@ -804,8 +806,10 @@ export class PiProcessSession {
           type: "tool_update",
           toolCallId: event.toolCallId,
           toolName: event.toolName,
+          input: event.args,
           output: event.partialResult,
           isCumulative: true,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "tool_execution_end":
@@ -827,6 +831,7 @@ export class PiProcessSession {
           toolName: event.toolName,
           output: event.result,
           isError: event.isError,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "extension_ui_request":

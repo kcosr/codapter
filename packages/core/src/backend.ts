@@ -1,3 +1,5 @@
+import type { ToolItemKind } from "./tool-kind.js";
+
 export interface BackendImageInput {
   readonly type: "image" | "localImage";
   readonly mimeType?: string;
@@ -77,14 +79,17 @@ export interface BackendToolStartEvent extends BackendBaseEvent {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly input: unknown;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendToolUpdateEvent extends BackendBaseEvent {
   readonly type: "tool_update";
   readonly toolCallId: string;
   readonly toolName: string;
+  readonly input?: unknown;
   readonly output: unknown;
   readonly isCumulative: boolean;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendToolEndEvent extends BackendBaseEvent {
@@ -93,6 +98,7 @@ export interface BackendToolEndEvent extends BackendBaseEvent {
   readonly toolName: string;
   readonly output: unknown;
   readonly isError: boolean;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendMessageEndEvent extends BackendBaseEvent {
