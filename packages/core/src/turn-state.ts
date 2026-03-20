@@ -188,7 +188,7 @@ export class TurnStateMachine {
         );
         return null;
       case "tool_end":
-        await this.handleToolEnd(event.toolCallId, event.output, event.isError, event.toolKind);
+        await this.handleToolEnd(event.toolCallId, event.output, event.isError);
         return null;
       case "message_end":
         return await this.complete("completed", null);
@@ -298,10 +298,13 @@ export class TurnStateMachine {
     isCumulative: boolean,
     toolKind?: ToolItemKind
   ): Promise<void> {
-    const state = this.toolStates.get(toolCallId);
+    let state = this.toolStates.get(toolCallId);
     if (!state) {
       await this.handleToolStart(toolCallId, toolName, input ?? {}, toolKind);
-      return this.handleToolUpdate(toolCallId, toolName, input, output, isCumulative, toolKind);
+      state = this.toolStates.get(toolCallId);
+      if (!state) {
+        throw new Error(`Tool state missing after synthetic start for ${toolCallId}`);
+      }
     }
 
     const next = toolOutputText(output);
@@ -352,8 +355,7 @@ export class TurnStateMachine {
   private async handleToolEnd(
     toolCallId: string,
     output: unknown,
-    isError: boolean,
-    _toolKind?: ToolItemKind
+    isError: boolean
   ): Promise<void> {
     const state = this.toolStates.get(toolCallId);
     if (!state) {

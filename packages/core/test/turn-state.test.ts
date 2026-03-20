@@ -349,4 +349,65 @@ describe("TurnStateMachine", () => {
       ],
     });
   });
+
+  it("recovers a missing tool_start with empty input when update metadata omits it", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      toolKind: "commandExecution",
+      output: { content: [{ type: "text", text: "ok" }] },
+      isCumulative: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      items: [
+        {
+          type: "commandExecution",
+          command: "",
+          commandActions: [],
+          aggregatedOutput: "ok",
+        },
+      ],
+    });
+  });
+
+  it("drops orphaned tool_end events without creating synthetic items", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_missing",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "ignored" }] },
+      isError: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      status: "completed",
+      items: [],
+    });
+  });
 });
