@@ -224,17 +224,12 @@ async function extractEntrypoint({ checkoutDir, entrypoint, outputRoot, targetNa
     true,
     ts.ScriptKind.TS
   );
-  const declarations = [];
-
-  for (const exportName of entrypoint.exports) {
-    const declaration = findExportedDeclaration(sourceFile, exportName);
-    if (!declaration) {
-      throw new Error(
-        `Target ${targetName} entrypoint ${relativeSourcePath} does not export ${exportName}`
-      );
-    }
-    declarations.push(declaration.getFullText(sourceFile).trim());
-  }
+  const declarations = collectExtractDeclarations(
+    sourceFile,
+    relativeSourcePath,
+    entrypoint.exports,
+    targetName
+  );
 
   const outputPath = toDeclarationOutputPath(outputRoot, relativeSourcePath);
   const fileHeader = [
@@ -247,18 +242,210 @@ async function extractEntrypoint({ checkoutDir, entrypoint, outputRoot, targetNa
   return outputPath;
 }
 
-function findExportedDeclaration(sourceFile, exportName) {
+function collectExtractDeclarations(sourceFile, relativeSourcePath, exportNames, targetName) {
+  const declarationsByName = new Map();
   for (const statement of sourceFile.statements) {
-    if (!hasExportModifier(statement) || !statement.name || statement.name.text !== exportName) {
+    if (!hasExportModifier(statement) || !statement.name) {
       continue;
     }
 
-    if (ts.isTypeAliasDeclaration(statement) || ts.isInterfaceDeclaration(statement)) {
-      return statement;
+    if (
+      ts.isTypeAliasDeclaration(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isEnumDeclaration(statement)
+    ) {
+      declarationsByName.set(statement.name.text, statement);
     }
   }
 
+  const orderedNames = [];
+  const visiting = new Set();
+  const visited = new Set();
+
+  const visit = (name) => {
+    if (visited.has(name)) {
+      return;
+    }
+
+    const declaration = declarationsByName.get(name);
+    if (!declaration) {
+      throw new Error(
+        `Target ${targetName} entrypoint ${sourceFile.fileName} does not export ${name}`
+      );
+    }
+
+    if (visiting.has(name)) {
+      return;
+    }
+    visiting.add(name);
+
+    for (const dependency of collectLocalTypeDependencies(declaration, declarationsByName)) {
+      visit(dependency);
+    }
+
+    visiting.delete(name);
+    visited.add(name);
+    orderedNames.push(name);
+  };
+
+  for (const exportName of exportNames) {
+    visit(exportName);
+  }
+
+  assertNoImportedTypeDependencies(
+    sourceFile,
+    relativeSourcePath,
+    orderedNames.map((name) => declarationsByName.get(name)),
+    targetName
+  );
+
+  return orderedNames.map((name) => declarationsByName.get(name).getFullText(sourceFile).trim());
+}
+
+function collectLocalTypeDependencies(declaration, declarationsByName) {
+  const dependencies = new Set();
+
+  const visit = (node) => {
+    if (ts.isTypeReferenceNode(node)) {
+      // Same-file dependency resolution needs the leaf declaration name (`Foo.Bar` -> `Bar`).
+      const name = entityNameText(node.typeName);
+      if (name && name !== declaration.name?.text && declarationsByName.has(name)) {
+        dependencies.add(name);
+      }
+    }
+
+    if (ts.isExpressionWithTypeArguments(node)) {
+      const name = entityNameText(node.expression);
+      if (name && name !== declaration.name?.text && declarationsByName.has(name)) {
+        dependencies.add(name);
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(declaration);
+  return [...dependencies].sort();
+}
+
+function entityNameText(name) {
+  if (ts.isIdentifier(name)) {
+    return name.text;
+  }
+
+  if (ts.isQualifiedName(name)) {
+    return entityNameText(name.right);
+  }
+
+  if (ts.isPropertyAccessExpression(name)) {
+    return entityNameText(name.name);
+  }
+
   return null;
+}
+
+function rootEntityNameText(name) {
+  if (ts.isIdentifier(name)) {
+    return name.text;
+  }
+
+  if (ts.isQualifiedName(name)) {
+    return rootEntityNameText(name.left);
+  }
+
+  if (ts.isPropertyAccessExpression(name)) {
+    return rootEntityNameText(name.expression);
+  }
+
+  return null;
+}
+
+function assertNoImportedTypeDependencies(
+  sourceFile,
+  relativeSourcePath,
+  declarations,
+  targetName
+) {
+  const importedNames = new Map();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement) || !statement.importClause) {
+      continue;
+    }
+
+    const moduleName = ts.isStringLiteral(statement.moduleSpecifier)
+      ? statement.moduleSpecifier.text
+      : "<unknown>";
+    const { importClause } = statement;
+
+    if (importClause.name) {
+      importedNames.set(importClause.name.text, moduleName);
+    }
+
+    const bindings = importClause.namedBindings;
+    if (!bindings) {
+      continue;
+    }
+
+    if (ts.isNamespaceImport(bindings)) {
+      importedNames.set(bindings.name.text, moduleName);
+      continue;
+    }
+
+    for (const element of bindings.elements) {
+      importedNames.set(element.name.text, moduleName);
+    }
+  }
+
+  if (importedNames.size === 0) {
+    return;
+  }
+
+  const unresolvedImports = new Set();
+  const noteImportedReference = (name) => {
+    const moduleName = importedNames.get(name);
+    if (moduleName) {
+      unresolvedImports.add(`${name} from ${moduleName}`);
+    }
+  };
+
+  const visit = (node) => {
+    if (ts.isTypeReferenceNode(node)) {
+      // Imported dependency checks need the namespace root (`Foo.Bar` -> `Foo`).
+      const name = rootEntityNameText(node.typeName);
+      if (name) {
+        noteImportedReference(name);
+      }
+    }
+
+    if (ts.isExpressionWithTypeArguments(node)) {
+      const name = rootEntityNameText(node.expression);
+      if (name) {
+        noteImportedReference(name);
+      }
+    }
+
+    if (ts.isImportTypeNode(node)) {
+      const argumentText = node.argument.getText(sourceFile);
+      unresolvedImports.add(`import type ${argumentText}`);
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  for (const declaration of declarations) {
+    visit(declaration);
+  }
+
+  if (unresolvedImports.size > 0) {
+    throw new Error(
+      `Target ${targetName} entrypoint ${relativeSourcePath} extract mode references imported types: ${[
+        ...unresolvedImports,
+      ]
+        .sort()
+        .join(", ")}`
+    );
+  }
 }
 
 function hasExportModifier(statement) {

@@ -131,7 +131,12 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    write({",
     "      type: 'message_update',",
     "      message: assistantFinalMessage,",
-    "      assistantMessageEvent: { type: 'text_delta', delta: 'response-' + turnId },",
+    "      assistantMessageEvent: {",
+    "        type: 'text_delta',",
+    "        contentIndex: 0,",
+    "        delta: 'response-' + turnId,",
+    "        partial: assistantFinalMessage,",
+    "      },",
     "    });",
     "    write({ type: 'message_end', message: assistantFinalMessage });",
     "    write({ type: 'turn_end', message: assistantFinalMessage, toolResults: [] });",
@@ -229,6 +234,34 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    if (command.message === 'crash now') {",
     "      response(id, 'prompt');",
     "      setTimeout(() => process.exit(13), 5);",
+    "      return;",
+    "    }",
+    "    if (command.message === 'assistant error') {",
+    "      response(id, 'prompt');",
+    "      setTimeout(() => {",
+    "        const assistantError = {",
+    "          role: 'assistant',",
+    "          content: [{ type: 'text', text: 'failed' }],",
+    "          api: 'openai-codex-responses',",
+    "          provider: 'openai-codex',",
+    "          model: 'gpt-5.3-codex',",
+    "          usage: {",
+    "            input: 0,",
+    "            output: 0,",
+    "            cacheRead: 0,",
+    "            cacheWrite: 0,",
+    "            totalTokens: 0,",
+    "            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },",
+    "          },",
+    "          stopReason: 'error',",
+    "          errorMessage: 'nested assistant failure',",
+    "          timestamp: Date.now(),",
+    "        };",
+    "        write({",
+    "          type: 'message_update',",
+    "          assistantMessageEvent: { type: 'error', reason: 'error', error: assistantError },",
+    "        });",
+    "      }, 15);",
     "      return;",
     "    }",
     "    response(id, 'prompt');",
@@ -540,6 +573,48 @@ describe("PiBackend", () => {
         turnId: "turn_crash",
         message: "Pi process exited with code 13",
         fatal: true,
+      });
+
+      subscription.dispose();
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it("maps vendored assistant message error events to backend errors", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-"));
+    const sessionDir = join(rootDir, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+    });
+
+    await backend.initialize();
+
+    try {
+      const sessionId = await backend.createSession();
+      const events: Array<{ type: string; message?: string; turnId?: string }> = [];
+      const subscription = backend.onEvent(sessionId, (event) => {
+        events.push(event);
+      });
+
+      await backend.prompt(sessionId, "turn_error", "assistant error");
+
+      const errorEvent = await waitFor(
+        () =>
+          events.find((event) => event.type === "error") as
+            | { type: string; message?: string; turnId?: string }
+            | undefined
+      );
+
+      expect(errorEvent).toMatchObject({
+        type: "error",
+        turnId: "turn_error",
+        message: "nested assistant failure",
       });
 
       subscription.dispose();

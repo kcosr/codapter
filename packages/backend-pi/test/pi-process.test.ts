@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAssistantMessageEvent,
   isElicitationRequest,
   isRpcExtensionUIRequest,
   isToolExecutionEndEvent,
@@ -10,6 +11,24 @@ import {
 } from "../src/pi-process.js";
 
 describe("pi-process vendored PI helpers", () => {
+  const assistantMessage = {
+    role: "assistant",
+    content: [],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.3-codex",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop" as const,
+    timestamp: Date.now(),
+  };
+
   it("accepts typed extension UI requests and narrows elicitation variants", () => {
     const request = {
       type: "extension_ui_request",
@@ -101,6 +120,49 @@ describe("pi-process vendored PI helpers", () => {
     ).toBe(true);
   });
 
+  it("accepts vendored assistant message events", () => {
+    expect(
+      isAssistantMessageEvent({
+        type: "start",
+        partial: assistantMessage,
+      })
+    ).toBe(true);
+    expect(
+      isAssistantMessageEvent({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "hello",
+        partial: assistantMessage,
+      })
+    ).toBe(true);
+    expect(
+      isAssistantMessageEvent({
+        type: "done",
+        reason: "stop",
+        message: assistantMessage,
+      })
+    ).toBe(true);
+    expect(
+      isAssistantMessageEvent({
+        type: "thinking_end",
+        contentIndex: 0,
+        content: "done thinking",
+        partial: assistantMessage,
+      })
+    ).toBe(true);
+    expect(
+      isAssistantMessageEvent({
+        type: "error",
+        reason: "aborted",
+        error: {
+          ...assistantMessage,
+          stopReason: "error",
+          errorMessage: "nested failure",
+        },
+      })
+    ).toBe(true);
+  });
+
   it("rejects malformed tool execution events", () => {
     expect(
       isToolExecutionStartEvent({
@@ -123,6 +185,38 @@ describe("pi-process vendored PI helpers", () => {
         toolName: "bash",
         result: {},
         isError: "no",
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "error",
+        reason: "error",
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "error",
+        reason: "error",
+        error: null,
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "start",
+        partial: null,
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "done",
+        reason: "stop",
+        message: "not-a-message",
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "unknown_event",
+        partial: assistantMessage,
       })
     ).toBe(false);
   });

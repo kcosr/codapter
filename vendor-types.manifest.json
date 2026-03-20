@@ -31,7 +31,7 @@
         {
           "source": "packages/ai/src/types.ts",
           "mode": "extract",
-          "exports": ["ImageContent"]
+          "exports": ["ImageContent", "AssistantMessageEvent"]
         },
         {
           "source": "packages/coding-agent/src/modes/rpc/rpc-types.ts",
@@ -48,7 +48,7 @@
           ]
         }
       ],
-      "entrypointPolicy": "Entrypoints are seeds; extraction mode is limited to standalone exported declarations needed for first-pass backend-pi adoption."
+      "entrypointPolicy": "Entrypoints are seeds; extract mode vendors selected exported declarations plus same-file exported type dependencies and fails loudly on imported type references."
     }
   }
 }

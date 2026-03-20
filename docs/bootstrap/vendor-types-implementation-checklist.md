@@ -115,7 +115,7 @@ Implementation decision notes for this pass:
 Implementation note:
 
 - `copy` entrypoints preserve whole upstream declarations and follow relative-import closure.
-- `extract` entrypoints are limited to standalone exported declarations needed for the first-pass PI adoption, which keeps this pass out of the unpublished `pi-mono` package graph while still pinning source file + commit in the manifest.
+- `extract` entrypoints preserve selected exported declarations plus any same-file exported type dependencies they reference, and they fail loudly on imported type references so unsupported `pi-mono` graph edges do not leak through as downstream build failures.
 
 **Done when**: `node scripts/vendor-types.mjs` can regenerate the vendored output from the manifest alone.
 
@@ -183,6 +183,7 @@ Comparison results:
 Adopted PI types for this pass:
 
 - `ImageContent`
+- `AssistantMessageEvent`
 - `RpcExtensionUIRequest`
 - `RpcExtensionUIResponse`
 
@@ -360,6 +361,21 @@ Review notes for the latest follow-on change:
   - disposed stale `system_error` source subscriptions before forking and documented the shared `fatal` backend-error contract
 - Explicit deferrals from that review:
   - no extra negative-path coverage was added beyond the existing non-fatal error regression test and the new system-error resume/fork tests
+- Review notes for the vendored `AssistantMessageEvent` follow-on slice:
+  - Gemini review found no blocking issues and called out one non-blocking future risk: the extract-mode AST walk only covers the declaration shapes we currently need.
+  - PI review flagged four actionable follow-ups:
+    - document why same-file dependency resolution uses the leaf identifier while import detection uses the namespace root
+    - harden `isAssistantMessageEvent` so `partial` must be a record, not just present
+    - add coverage for an additional assistant-event subtype and unknown-event rejection
+    - assert topological declaration ordering in the extract-mode fixture
+  - Accepted fixes from that review:
+    - added inline comments distinguishing `entityNameText()` from `rootEntityNameText()`
+    - tightened `isAssistantMessageEvent` to require record-shaped `partial` payloads
+    - added `thinking_end`, `aborted`, `partial: null`, and unknown-discriminant guard coverage
+    - added extract-output ordering assertions alongside the existing same-file dependency and cycle fixture coverage
+  - Explicit deferrals from that review:
+    - no generalized support was added for more complex future TypeScript shapes such as mapped or conditional types beyond the current vendored PI surface
+    - enum value-expression dependency walking remains out of scope for this narrow extract-mode implementation
 
 **Done when**: both external reviews have been completed on the implementation, and accepted findings are either fixed or explicitly deferred.
 

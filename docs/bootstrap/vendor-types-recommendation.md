@@ -152,7 +152,7 @@ Option 1 is the lowest-risk path for a type-contract-only goal because it preser
 The implemented first pass should keep Option 1 for copied Codex declarations and allow one narrow PI exception:
 
 - copy full upstream declarations only when the selected file graph stays small and local-import closure is sufficient,
-- otherwise extract standalone exported PI declarations into generated `.d.ts` files when that avoids pulling unpublished `pi-mono` package imports into this repo,
+- otherwise extract selected exported PI declarations plus same-file exported type dependencies into generated `.d.ts` files when that avoids pulling unpublished `pi-mono` package imports into this repo, and fail loudly if the selected declarations still depend on imported types,
 - keep the manifest as the pinned source of truth for both copied and extracted declarations.
 
 This still preserves the intended first-pass boundaries:

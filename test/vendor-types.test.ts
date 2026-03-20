@@ -58,6 +58,27 @@ describe("vendor-types script", () => {
         '  | { type: "extension_ui_response"; id: string; value: string }',
         '  | { type: "extension_ui_response"; id: string; confirmed: boolean };',
         "",
+        'export type Status = "ok" | "error";',
+        "",
+        "export interface Message {",
+        "  status: Status;",
+        "  image: ImageContent;",
+        "}",
+        "",
+        "export type MessageEvent =",
+        '  | { type: "delta"; partial: Message }',
+        '  | { type: "done"; message: Message };',
+        "",
+        "export interface CycleA {",
+        "  next?: CycleB;",
+        "}",
+        "",
+        "export interface CycleB {",
+        "  next?: CycleA;",
+        "}",
+        "",
+        "export type CycleEvent = { cycle: CycleA };",
+        "",
       ].join("\n"),
       "utf8"
     );
@@ -84,7 +105,7 @@ describe("vendor-types script", () => {
                 {
                   source: "src/rpc-types.ts",
                   mode: "extract",
-                  exports: ["ImageContent", "RpcExtensionUIResponse"],
+                  exports: ["ImageContent", "RpcExtensionUIResponse", "MessageEvent", "CycleEvent"],
                 },
               ],
             },
@@ -119,7 +140,19 @@ describe("vendor-types script", () => {
     expect(copiedHelper).toContain("export interface Helper");
     expect(extractedTypes).toContain("export interface ImageContent");
     expect(extractedTypes).toContain("export type RpcExtensionUIResponse");
+    expect(extractedTypes).toContain('export type Status = "ok" | "error";');
+    expect(extractedTypes).toContain("export interface Message {");
+    expect(extractedTypes).toContain("export type MessageEvent =");
+    expect(extractedTypes).toContain("export interface CycleA {");
+    expect(extractedTypes).toContain("export interface CycleB {");
+    expect(extractedTypes).toContain("export type CycleEvent = { cycle: CycleA };");
     expect(extractedTypes).not.toContain("import ");
+    expect(extractedTypes.indexOf('export type Status = "ok" | "error";')).toBeLessThan(
+      extractedTypes.indexOf("export interface Message {")
+    );
+    expect(extractedTypes.indexOf("export interface Message {")).toBeLessThan(
+      extractedTypes.indexOf("export type MessageEvent =")
+    );
     expect(provenance.outputFiles).toEqual(["src/entry.d.ts", "src/helper.d.ts"]);
 
     const beforeSecondRun = await readFile(
@@ -179,6 +212,64 @@ describe("vendor-types script", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("could not read src/missing.ts");
+  });
+
+  it("fails loudly when extract mode depends on imported types", async () => {
+    const rootDir = await createTempDir();
+    const repoDir = path.join(rootDir, "fixture-repo");
+    await mkdir(path.join(repoDir, "src"), { recursive: true });
+    await writeFile(
+      path.join(repoDir, "src", "shared.ts"),
+      ["export interface Shared {", "  value: string;", "}", ""].join("\n"),
+      "utf8"
+    );
+    await writeFile(
+      path.join(repoDir, "src", "types.ts"),
+      [
+        'import type { Shared } from "./shared";',
+        "",
+        "export interface NeedsShared {",
+        "  shared: Shared;",
+        "}",
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const commit = await createGitCommit(repoDir);
+    const manifestPath = path.join(rootDir, "vendor-types.manifest.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify(
+        {
+          version: 1,
+          targets: {
+            fixture: {
+              repo: toFileRepoUrl(repoDir),
+              commit,
+              outputRoot: "generated/extract",
+              entrypoints: [
+                {
+                  source: "src/types.ts",
+                  mode: "extract",
+                  exports: ["NeedsShared"],
+                },
+              ],
+            },
+          },
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    const result = await runNodeScript(["--manifest", manifestPath], rootDir);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(
+      "Target fixture entrypoint src/types.ts extract mode references imported types: Shared from ./shared"
+    );
   });
 
   it("fails loudly when the upstream repo is unreachable", async () => {

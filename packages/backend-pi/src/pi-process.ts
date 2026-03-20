@@ -10,7 +10,10 @@ import type {
   BackendTokenUsage,
 } from "@codapter/core";
 import { classifyToolName } from "@codapter/core";
-import type { ImageContent as PiImageContent } from "../../../types/pi/packages/ai/src/types.js";
+import type {
+  AssistantMessageEvent as PiAssistantMessageEvent,
+  ImageContent as PiImageContent,
+} from "../../../types/pi/packages/ai/src/types.js";
 import type {
   ToolExecutionEndEvent as VendoredToolExecutionEndEvent,
   ToolExecutionStartEvent as VendoredToolExecutionStartEvent,
@@ -41,6 +44,7 @@ export interface PiProcessResponse<T = unknown> {
 type ToolExecutionStartEvent = VendoredToolExecutionStartEvent;
 type ToolExecutionUpdateEvent = VendoredToolExecutionUpdateEvent;
 type ToolExecutionEndEvent = VendoredToolExecutionEndEvent;
+type AssistantMessageEvent = PiAssistantMessageEvent;
 
 export interface PiSessionStateSnapshot {
   readonly sessionId: string;
@@ -158,6 +162,53 @@ export function isToolExecutionEndEvent(value: unknown): value is ToolExecutionE
     typeof value.isError === "boolean" &&
     "result" in value
   );
+}
+
+export function isAssistantMessageEvent(value: unknown): value is AssistantMessageEvent {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  switch (value.type) {
+    case "start":
+      return isRecord(value.partial);
+    case "text_start":
+    case "thinking_start":
+    case "toolcall_start":
+      return typeof value.contentIndex === "number" && isRecord(value.partial);
+    case "text_delta":
+    case "thinking_delta":
+    case "toolcall_delta":
+      return (
+        typeof value.contentIndex === "number" &&
+        typeof value.delta === "string" &&
+        isRecord(value.partial)
+      );
+    case "text_end":
+    case "thinking_end":
+      return (
+        typeof value.contentIndex === "number" &&
+        typeof value.content === "string" &&
+        isRecord(value.partial)
+      );
+    case "toolcall_end":
+      return (
+        typeof value.contentIndex === "number" && "toolCall" in value && isRecord(value.partial)
+      );
+    case "done":
+      return (
+        (value.reason === "stop" || value.reason === "length" || value.reason === "toolUse") &&
+        isRecord(value.message)
+      );
+    case "error":
+      return (
+        (value.reason === "aborted" || value.reason === "error") &&
+        isRecord(value.error) &&
+        (value.error.errorMessage === undefined || typeof value.error.errorMessage === "string")
+      );
+    default:
+      return false;
+  }
 }
 
 export function isRpcExtensionUIRequest(value: unknown): value is RpcExtensionUIRequest {
@@ -873,10 +924,10 @@ export class PiProcessSession {
   }
 
   private emitMessageUpdate(event: Record<string, unknown>): void {
-    const assistantEvent = isRecord(event.assistantMessageEvent)
+    const assistantEvent = isAssistantMessageEvent(event.assistantMessageEvent)
       ? event.assistantMessageEvent
       : undefined;
-    if (!assistantEvent || typeof assistantEvent.type !== "string") {
+    if (!assistantEvent) {
       this.logWriter?.write({
         at: new Date().toISOString(),
         component: "pi-process",
@@ -943,7 +994,7 @@ export class PiProcessSession {
         sessionId: this.opaqueSessionId,
         turnId: this.currentTurnId ?? "unknown",
         type: "error",
-        message: String(assistantEvent.errorMessage ?? "Pi assistant error"),
+        message: String(assistantEvent.error.errorMessage ?? "Pi assistant error"),
       });
       return;
     }
