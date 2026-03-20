@@ -202,19 +202,19 @@ Adopted PI types for this pass:
 
 ### 4.2 CI Policy
 
-- [ ] Update CI pipeline to run `npm run vendor-types` before build
-- [ ] Update CI pipeline to run `npm run vendor-types` before tests if tests depend on vendored imports
+- [x] Update CI pipeline to run `npm run vendor-types` before build
+- [x] Update CI pipeline to run `npm run vendor-types` before tests if tests depend on vendored imports
 - [x] Decide whether CI is allowed to fetch from the network
-- [ ] If CI cannot fetch:
+- [x] Document the fallback if CI cannot fetch:
   - stop here and revisit the gitignore decision
   - choose committed output instead
 
 Decision point recorded:
 
-- No checked-in CI pipeline exists in this repository, so no workflow file was updated in this pass.
-- External CI owners must either:
-  - allow networked `npm run vendor-types` before build/test, or
-  - change policy and commit generated output instead.
+- GitHub Actions is now checked in at `.github/workflows/ci.yml`.
+- The workflow runs `npm ci`, `npm run vendor-types`, `npm run build`, `npm run lint`, and `npm test` on fresh clones.
+- The checked-in CI policy therefore explicitly allows networked vendoring from pinned upstream commits before build/test.
+- If that policy changes in the future, the fallback remains the same: commit generated vendored output instead of relying on CI-time fetches.
 
 **Done when**: CI behavior matches the repo policy for vendored output.
 
@@ -373,9 +373,21 @@ Review notes for the latest follow-on change:
     - tightened `isAssistantMessageEvent` to require record-shaped `partial` payloads
     - added `thinking_end`, `aborted`, `partial: null`, and unknown-discriminant guard coverage
     - added extract-output ordering assertions alongside the existing same-file dependency and cycle fixture coverage
+- Explicit deferrals from that review:
+  - no generalized support was added for more complex future TypeScript shapes such as mapped or conditional types beyond the current vendored PI surface
+  - enum value-expression dependency walking remains out of scope for this narrow extract-mode implementation
+- Review notes for the CI wiring follow-on slice:
+  - Gemini review found no blocking issues and reiterated the documented operational risk that CI now depends on networked vendoring from pinned upstream commits.
+  - PI review flagged three actionable follow-ups:
+    - make sure the new workflow file ships in the same commit as the checklist/changelog claims
+    - clarify that the checklist item is documenting the no-network fallback, not claiming that fallback path was taken
+    - avoid a local absolute path when referencing the checked-in workflow file
+  - Accepted fixes from that review:
+    - the workflow file is included in the milestone commit
+    - the fallback checklist line now explicitly says it documents the no-network fallback
+    - the workflow reference now uses `.github/workflows/ci.yml` instead of a machine-local absolute path
   - Explicit deferrals from that review:
-    - no generalized support was added for more complex future TypeScript shapes such as mapped or conditional types beyond the current vendored PI surface
-    - enum value-expression dependency walking remains out of scope for this narrow extract-mode implementation
+    - the workflow still triggers on all pushes and pull requests; narrowing trigger scope is left as a future CI-cost optimization if needed
 
 **Done when**: both external reviews have been completed on the implementation, and accepted findings are either fixed or explicitly deferred.
 
@@ -399,7 +411,7 @@ Review notes for the latest follow-on change:
 
 - [x] `vendor-types.manifest.json` is checked in
 - [x] `scripts/vendor-types.mjs` exists and regenerates vendored output from pinned commits
-- [ ] `types/codex/` and `types/pi/` policy is implemented consistently with CI
+- [x] `types/codex/` and `types/pi/` policy is implemented consistently with CI
 - [x] At least one import in `packages/core/src/protocol.ts` uses a vendored Codex type
 - [x] Vendored PI types are consumed only inside `packages/backend-pi`
 - [x] `npm run vendor-types` succeeds
