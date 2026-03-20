@@ -14,10 +14,18 @@ describe("classifyToolName", () => {
 
   it("uses token fallback for variant names", () => {
     expect(classifyToolName("shell-tool")).toBe("commandExecution");
+    expect(classifyToolName("exec-tool")).toBe("commandExecution");
     expect(classifyToolName("write-file")).toBe("fileChange");
+    expect(classifyToolName("apply-patch-tool")).toBe("fileChange");
   });
 
-  it("falls back to agentMessage for unknown tools", () => {
+  it("normalizes case and surrounding whitespace", () => {
+    expect(classifyToolName(" Bash ")).toBe("commandExecution");
+    expect(classifyToolName("FILE_EDIT")).toBe("fileChange");
+  });
+
+  it("falls back to agentMessage for unknown and read-only tools", () => {
     expect(classifyToolName("search_web")).toBe("agentMessage");
+    expect(classifyToolName("read_file")).toBe("agentMessage");
   });
 });

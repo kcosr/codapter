@@ -265,4 +265,40 @@ describe("TurnStateMachine", () => {
       ],
     });
   });
+
+  it("completes the turn as failed on backend error events", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "text_delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      delta: "partial",
+    });
+
+    const completed = await machine.handleEvent({
+      type: "error",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      message: "backend failed",
+    });
+
+    expect(completed).toMatchObject({
+      status: "failed",
+      error: {
+        message: "backend failed",
+        codexErrorInfo: null,
+        additionalDetails: null,
+      },
+      items: [
+        {
+          type: "agentMessage",
+          text: "partial",
+        },
+      ],
+    });
+    expect(sink.notifications.some((notification) => notification.method === "error")).toBe(true);
+  });
 });

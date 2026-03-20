@@ -6,4 +6,5 @@ export * from "./jsonrpc.js";
 export * from "./ndjson.js";
 export * from "./protocol.js";
 export * from "./thread-registry.js";
+export * from "./tool-kind.js";
 export * from "./turn-state.js";

@@ -28,7 +28,7 @@ export function classifyToolName(toolName: string): ToolItemKind {
   }
 
   const tokens = tokenizeToolName(normalized);
-  if (tokens.includes("bash") || tokens.includes("shell")) {
+  if (tokens.includes("bash") || tokens.includes("shell") || tokens.includes("exec")) {
     return "commandExecution";
   }
   if (
