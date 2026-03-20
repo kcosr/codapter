@@ -671,10 +671,19 @@ export class PiProcessSession {
       const error = new Error(
         `Pi process exited${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}`
       );
+      if (this.currentTurnId) {
+        this.emit({
+          sessionId: this.opaqueSessionId,
+          turnId: this.currentTurnId,
+          type: "error",
+          message: error.message,
+        });
+      }
       for (const pending of this.pending.values()) {
         pending.reject(error);
       }
       this.pending.clear();
+      this.currentTurnId = null;
       this.process = null;
       this.stopReadingStdout?.();
       this.stopReadingStdout = null;

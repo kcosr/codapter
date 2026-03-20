@@ -295,6 +295,8 @@ Validation note:
 - [x] Preserve assistant `stopReason` and `errorMessage` across the PI backend boundary so historical failed turns can be reconstructed accurately
 - [x] Classify turn failures into vendored `CodexErrorInfo` variants instead of always emitting `null`
 - [x] Enrich normalized live tool events with backend-provided `toolKind` and update-time `input` so turn-state recovery uses adapter metadata instead of empty fallbacks
+- [x] Propagate PI subprocess exits during active turns as backend `error` events so core finalizes failed turns instead of hanging live state
+- [x] When prompt startup fails after a turn-level error is already emitted, return the finalized failed turn instead of layering an extra RPC error over the same failure
 
 ### F.4 Validation
 
@@ -320,17 +322,25 @@ Follow-on implementation notes:
 - Historical inline image inputs are normalized to vendored `UserInput` image URLs using `data:` URLs when only base64 payloads are available.
 - PI history normalization now preserves assistant `stopReason`/`errorMessage`, allowing `thread/resume` to rebuild failed turns with vendored `TurnError.codexErrorInfo`.
 - The adapter-owned `BackendToolUpdateEvent` now carries optional `input` and `toolKind`, and PI populates those fields so live recovery paths do not degrade to empty synthetic tool starts.
+- PI subprocess exits now surface through the normalized backend event stream as turn-scoped `error` events, allowing core to complete the active turn deterministically.
+- `turn/start` now preserves the graceful failed-turn result when the backend both emits a turn error and rejects the prompt request during startup, while still throwing on unrelated startup failures that never finalized the turn.
 
 ## Milestone 6: External Review Of Code Changes
 
-- [ ] After code changes land, run `$agent-runner-review` with `generic-gemini` on the implementation diff
-- [ ] After code changes land, run `$agent-runner-review` with `generic-pi` on the implementation diff
-- [ ] Ask both reviewers to focus on:
+- [x] After code changes land, run `$agent-runner-review` with `generic-gemini` on the implementation diff
+- [x] After code changes land, run `$agent-runner-review` with `generic-pi` on the implementation diff
+- [x] Ask both reviewers to focus on:
   - contract correctness
   - missing requirements
   - CI/bootstrap risks
   - test gaps
-- [ ] Triage findings before closing the task
+- [x] Triage findings before closing the task
+
+Review notes for the latest follow-on change:
+
+- PI review flagged the double-path startup failure case where an emitted backend error and a rejected `prompt()` could produce both `turn/completed` and an RPC error. Fixed by returning the already-finalized failed turn when the turn is no longer in progress.
+- Gemini review first failed because the reviewer could not inspect the diff without an inline patch; reran with the patch text included.
+- Gemini then flagged that the new `turn/start` catch path had removed the final fallback `throw`. Fixed by restoring the throw for any startup error that did not actually finalize the turn.
 
 **Done when**: both external reviews have been completed on the implementation, and accepted findings are either fixed or explicitly deferred.
 
@@ -360,7 +370,7 @@ Follow-on implementation notes:
 - [x] `npm run vendor-types` succeeds
 - [x] `npm run build` succeeds after vendoring
 - [x] Existing tests pass after vendoring
-- [ ] Gemini and PI have reviewed the implementation after code changes are in
+- [x] Gemini and PI have reviewed the implementation after code changes are in
 - [x] `README.md` documents the vendoring step
 
 ## Suggested Execution Order

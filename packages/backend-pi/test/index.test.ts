@@ -226,6 +226,11 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "  }",
     "",
     "  if (type === 'prompt') {",
+    "    if (command.message === 'crash now') {",
+    "      response(id, 'prompt');",
+    "      setTimeout(() => process.exit(13), 5);",
+    "      return;",
+    "    }",
     "    response(id, 'prompt');",
     "    emitPromptTurn(command.message);",
     "    return;",
@@ -498,5 +503,47 @@ describe("PiBackend", () => {
     const resumedHistory = await reopened.readSessionHistory(sessionId);
     expect(resumedHistory).toEqual(expect.any(Array));
     await reopened.dispose();
+  });
+
+  it("emits a backend error event when the Pi subprocess exits mid-turn", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-"));
+    const sessionDir = join(rootDir, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+    });
+
+    await backend.initialize();
+
+    try {
+      const sessionId = await backend.createSession();
+      const events: Array<{ type: string; message?: string; turnId?: string }> = [];
+      const subscription = backend.onEvent(sessionId, (event) => {
+        events.push(event);
+      });
+
+      await backend.prompt(sessionId, "turn_crash", "crash now");
+
+      const errorEvent = await waitFor(
+        () =>
+          events.find((event) => event.type === "error") as
+            | { type: string; message?: string; turnId?: string }
+            | undefined
+      );
+
+      expect(errorEvent).toMatchObject({
+        type: "error",
+        turnId: "turn_crash",
+        message: "Pi process exited with code 13",
+      });
+
+      subscription.dispose();
+    } finally {
+      await backend.dispose();
+    }
   });
 });

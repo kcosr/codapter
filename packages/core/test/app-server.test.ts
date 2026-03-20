@@ -849,6 +849,175 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("completes the active turn as failed when the backend emits an error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "error",
+          sessionId,
+          turnId,
+          message: "context window exceeded",
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage(message) {
+        if ("method" in message) {
+          notifications.push(message);
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(notifications).toContainEqual(
+        expect.objectContaining({
+          method: "turn/completed",
+          params: {
+            threadId,
+            turn: expect.objectContaining({
+              status: "failed",
+              error: {
+                message: "context window exceeded",
+                codexErrorInfo: "contextWindowExceeded",
+                additionalDetails: null,
+              },
+            }),
+          },
+        })
+      );
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            (message.params as { status?: { type?: string } } | undefined)?.status?.type === "idle"
+        )
+      ).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the failed turn instead of an RPC error when prompt rejects after emitting failure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: unknown }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "error",
+          sessionId,
+          turnId,
+          message: "Pi process exited with code 13",
+        });
+      });
+      throw new Error("Pi process exited with code 13");
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+      onMessage(message) {
+        if ("method" in message) {
+          notifications.push(message);
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      const response = await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "hello", text_elements: [] }],
+        },
+      });
+
+      expect(response).toMatchObject({
+        id: 3,
+        result: {
+          turn: {
+            status: "failed",
+            error: {
+              message: "Pi process exited with code 13",
+              codexErrorInfo: "other",
+              additionalDetails: null,
+            },
+          },
+        },
+      });
+      expect(notifications.filter((message) => message.method === "turn/completed")).toHaveLength(
+        1
+      );
+      expect(
+        notifications.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            (message.params as { status?: { type?: string } } | undefined)?.status?.type === "idle"
+        )
+      ).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves backend event order when item startup notifications are slow", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));

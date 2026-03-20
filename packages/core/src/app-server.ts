@@ -1923,6 +1923,14 @@ export class AppServerConnection {
       });
       if (turn) {
         await this.finishTurn(parsed.threadId, turnId);
+        return {
+          turn,
+        };
+      }
+      if (runtime.activeTurnId !== turnId || machine.snapshot.status !== "inProgress") {
+        return {
+          turn: machine.snapshot,
+        };
       }
       throw error;
     }
