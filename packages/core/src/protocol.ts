@@ -1,3 +1,4 @@
+import type { GitInfo as VendoredGitInfo } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/GitInfo.js";
 import type { JsonRpcId } from "./jsonrpc.js";
 
 export type ClientInfo = {
@@ -335,11 +336,7 @@ export type ModelListResponse = {
   nextCursor: string | null;
 };
 
-export type GitInfo = {
-  sha: string | null;
-  branch: string | null;
-  originUrl: string | null;
-};
+export type GitInfo = VendoredGitInfo;
 
 export type ThreadStatus =
   | { type: "notLoaded" }

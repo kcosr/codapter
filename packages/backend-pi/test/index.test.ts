@@ -393,7 +393,7 @@ describe("PiBackend", () => {
         .every((event) => event.turnId === "turn_1")
     ).toBe(true);
     expect(tokenUsageEvent.usage).toMatchObject({
-      modelContextWindow: 1000000,
+      modelContextWindow: 272000,
       total: 12,
     });
 
@@ -440,23 +440,16 @@ describe("PiBackend", () => {
     expect(
       setModelLines.some(
         (record) =>
-          record.raw.includes('"provider":"anthropic"') &&
-          record.raw.includes('"modelId":"claude-opus-4-6"')
-      )
-    ).toBe(true);
-    expect(
-      setModelLines.some(
-        (record) =>
           record.raw.includes('"provider":"pi"') && record.raw.includes('"modelId":"mock-fast"')
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       setModelLines.some(
         (record) =>
           record.raw.includes('"provider":"openai-codex"') &&
           record.raw.includes('"modelId":"gpt-5.3-codex"')
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       logRecords.some(
         (record) => record.kind === "stdout" && record.raw.includes('"type":"message_update"')

@@ -9,6 +9,11 @@ import type {
   BackendModelSummary,
   BackendTokenUsage,
 } from "@codapter/core";
+import type { ImageContent as PiImageContent } from "../../../types/pi/packages/ai/src/types.js";
+import type {
+  RpcExtensionUIRequest,
+  RpcExtensionUIResponse,
+} from "../../../types/pi/packages/coding-agent/src/modes/rpc/rpc-types.js";
 import { attachJsonlLineReader, parseJsonLine, serializeJsonLine } from "./jsonl.js";
 import type { PiBackendSessionRecord } from "./state-store.js";
 
@@ -25,12 +30,6 @@ export interface PiProcessResponse<T = unknown> {
   readonly success: boolean;
   readonly data?: T;
   readonly error?: string;
-}
-
-interface PiImageContent {
-  readonly type: "image";
-  readonly data: string;
-  readonly mimeType: string;
 }
 
 export interface PiSessionStateSnapshot {
@@ -119,6 +118,53 @@ function defaultArgs(sessionDir: string): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export function isRpcExtensionUIRequest(value: unknown): value is RpcExtensionUIRequest {
+  if (!isRecord(value) || value.type !== "extension_ui_request" || typeof value.id !== "string") {
+    return false;
+  }
+
+  switch (value.method) {
+    case "select":
+      return (
+        typeof value.title === "string" &&
+        Array.isArray(value.options) &&
+        value.options.every((option) => typeof option === "string")
+      );
+    case "confirm":
+      return typeof value.title === "string" && typeof value.message === "string";
+    case "input":
+      return typeof value.title === "string";
+    case "editor":
+      return typeof value.title === "string";
+    case "notify":
+      return typeof value.message === "string";
+    case "setStatus":
+      return typeof value.statusKey === "string";
+    case "setWidget":
+      return typeof value.widgetKey === "string";
+    case "setTitle":
+      return typeof value.title === "string";
+    case "set_editor_text":
+      return typeof value.text === "string";
+    default:
+      return false;
+  }
+}
+
+export function isElicitationRequest(
+  request: RpcExtensionUIRequest
+): request is Extract<
+  RpcExtensionUIRequest,
+  { method: "select" | "confirm" | "input" | "editor" }
+> {
+  return (
+    request.method === "select" ||
+    request.method === "confirm" ||
+    request.method === "input" ||
+    request.method === "editor"
+  );
 }
 
 function normalizeModelKey(provider: string, id: string): string {
@@ -713,17 +759,12 @@ export class PiProcessSession {
         });
         return;
       case "extension_ui_request":
-        if (
-          event.method === "select" ||
-          event.method === "confirm" ||
-          event.method === "input" ||
-          event.method === "editor"
-        ) {
+        if (isRpcExtensionUIRequest(event) && isElicitationRequest(event)) {
           this.emit({
             sessionId: this.opaqueSessionId,
             turnId: this.currentTurnId ?? "unknown",
             type: "elicitation_request",
-            requestId: String(event.id ?? randomUUID()),
+            requestId: event.id,
             payload: event,
           });
         }
@@ -1009,10 +1050,10 @@ function parseUpstreamModelFromResponse(value: unknown): UpstreamModel | undefin
   return undefined;
 }
 
-function normalizeElicitationResponse(
+export function normalizeElicitationResponse(
   requestId: string,
   responseValue: unknown
-): Record<string, unknown> {
+): RpcExtensionUIResponse {
   if (typeof responseValue === "string") {
     return { type: "extension_ui_response", id: requestId, value: responseValue };
   }
