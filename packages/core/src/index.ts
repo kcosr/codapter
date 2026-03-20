@@ -1,5 +1,7 @@
 export * from "./app-server.js";
 export * from "./backend.js";
+export * from "./codex-error-info.js";
+export * from "./command-actions.js";
 export * from "./command-exec.js";
 export * from "./config-store.js";
 export * from "./jsonrpc.js";

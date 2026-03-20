@@ -10,6 +10,8 @@ import type {
   Disposable,
   IBackend,
 } from "./backend.js";
+import { classifyCodexErrorInfo } from "./codex-error-info.js";
+import { inferCommandActions } from "./command-actions.js";
 import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
@@ -624,14 +626,14 @@ function fileUpdateChangesFromUnknown(value: unknown): FileUpdateChange[] {
   });
 }
 
-function finalizeHistoricalToolItem(item: ThreadItem): void {
+function finalizeHistoricalToolItem(item: ThreadItem, turnStatus: Turn["status"]): void {
   if (item.type === "commandExecution" && item.status === "inProgress") {
-    item.status = "completed";
-    item.exitCode = item.exitCode ?? 0;
+    item.status = turnStatus === "failed" ? "failed" : "completed";
+    item.exitCode = item.exitCode ?? (turnStatus === "failed" ? 1 : 0);
     item.durationMs = item.durationMs ?? 0;
   }
   if (item.type === "fileChange" && item.status === "inProgress") {
-    item.status = "completed";
+    item.status = turnStatus === "failed" ? "failed" : "completed";
   }
 }
 
@@ -656,8 +658,9 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   };
 
   const finalizeTurn = () => {
+    const turnStatus = currentTurn?.status ?? "completed";
     for (const item of pendingTools.values()) {
-      finalizeHistoricalToolItem(item);
+      finalizeHistoricalToolItem(item, turnStatus);
     }
     currentTurn = null;
     pendingTools = new Map<string, ThreadItem>();
@@ -713,17 +716,18 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
               ? block.id
               : `${message.id}_tool_${index}`;
           const toolKind = classifyToolName(toolName);
+          const command = commandFromToolArguments(block.arguments);
           const item: ThreadItem =
             toolKind === "commandExecution"
               ? {
                   type: "commandExecution",
                   id: `${message.id}_tool_${index}`,
-                  command: commandFromToolArguments(block.arguments),
+                  command,
                   cwd,
                   processId: null,
                   source: "agent",
                   status: "inProgress",
-                  commandActions: [],
+                  commandActions: inferCommandActions(command),
                   aggregatedOutput: null,
                   exitCode: null,
                   durationMs: null,
@@ -760,6 +764,11 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
             memoryCitation: null,
           });
         }
+      }
+      if (message.stopReason === "error") {
+        turn.status = "failed";
+        turn.error = turnErrorFromUnknown(message.errorMessage ?? "Pi assistant error");
+        finalizeTurn();
       }
       continue;
     }
@@ -864,9 +873,10 @@ function runtimeToThreadStatus(
 }
 
 function turnErrorFromUnknown(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
   return {
-    message: error instanceof Error ? error.message : String(error),
-    codexErrorInfo: null,
+    message,
+    codexErrorInfo: classifyCodexErrorInfo(message),
     additionalDetails: null,
   };
 }

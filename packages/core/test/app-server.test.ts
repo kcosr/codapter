@@ -1248,6 +1248,80 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("reconstructs failed historical turns with vendored error info", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend();
+    const entry = await threadRegistry.create({
+      backendSessionId: "session_1",
+      backendType: "pi",
+      cwd: "/repo",
+      preview: "broken prompt",
+      modelProvider: "pi",
+      gitInfo: null,
+    });
+    backend.sessionHistories.set("session_1", [
+      {
+        id: "user-1",
+        role: "user",
+        content: [{ type: "text", text: "broken prompt", text_elements: [] }],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "text", text: "I could not complete that." }],
+        stopReason: "error",
+        errorMessage: "prompt is too long for this model",
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const resumed = await connection.handleMessage({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: entry.threadId,
+          persistExtendedHistory: false,
+        },
+      });
+
+      expect(resumed).toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            turns: [
+              {
+                status: "failed",
+                error: {
+                  message: "prompt is too long for this model",
+                  codexErrorInfo: "contextWindowExceeded",
+                  additionalDetails: null,
+                },
+              },
+            ],
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("supports buffered and streaming command execution", async () => {
     const notifications: Array<{ method: string; params?: unknown }> = [];
     const connection = new AppServerConnection({

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
+import { classifyCodexErrorInfo } from "./codex-error-info.js";
+import { inferCommandActions } from "./command-actions.js";
 import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
 import { classifyToolName } from "./tool-kind.js";
 
@@ -191,7 +193,7 @@ export class TurnStateMachine {
       case "error":
         return await this.complete("failed", {
           message: event.message,
-          codexErrorInfo: null,
+          codexErrorInfo: classifyCodexErrorInfo(event.message),
           additionalDetails: null,
         });
       case "elicitation_request":
@@ -255,7 +257,7 @@ export class TurnStateMachine {
             processId: null,
             source: "agent",
             status: "inProgress",
-            commandActions: [],
+            commandActions: inferCommandActions(inferCommand(input)),
             aggregatedOutput: null,
             exitCode: null,
             durationMs: null,

@@ -11,6 +11,8 @@ export interface BackendMessage {
   readonly role: string;
   readonly content: unknown;
   readonly createdAt: string;
+  readonly stopReason?: string;
+  readonly errorMessage?: string | null;
 }
 
 export interface BackendSessionSummary {

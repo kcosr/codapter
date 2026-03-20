@@ -287,17 +287,22 @@ Validation note:
 - [x] Update historical file tool items to emit vendored `FileUpdateChange[]`
 - [x] Update agent message items to include the vendored `memoryCitation` field
 - [x] Update command execution items to include the vendored `source` field
+- [x] Populate vendored `commandActions` instead of emitting empty lists for command items
 - [x] Stop emitting non-upstream thread active flags and restrict status output to valid vendored values
 - [x] Surface `waitingOnUserInput` when a tool-user-input request is pending
 - [x] Stop emitting non-upstream `"interrupted"` item statuses for in-flight tool items
 - [x] Centralize live and historical tool classification behind one shared core helper
+- [x] Preserve assistant `stopReason` and `errorMessage` across the PI backend boundary so historical failed turns can be reconstructed accurately
+- [x] Classify turn failures into vendored `CodexErrorInfo` variants instead of always emitting `null`
 
 ### F.4 Validation
 
 - [x] Add resumed-history coverage for inline image/user-input normalization
 - [x] Add resumed-history coverage for vendored file-change normalization
+- [x] Add resumed-history coverage for failed assistant turns reconstructed from backend message metadata
 - [x] Add direct unit coverage for interrupted in-flight tool items under the vendored item union
 - [x] Add direct unit coverage for reasoning/text streaming, command streaming, and unknown-tool fallback in `TurnStateMachine`
+- [x] Add direct unit coverage for command-action inference and Codex error classification helpers
 - [x] Re-run `npm run vendor-types`
 - [x] Re-run `npm run lint`
 - [x] Re-run `npm run build`
@@ -307,9 +312,11 @@ Validation note:
 Follow-on implementation notes:
 
 - Upstream Codex `ThreadItem` at the pinned commit now requires `agentMessage.memoryCitation` and `commandExecution.source`; the adapter now emits those fields directly instead of preserving reduced local variants.
+- Command-execution items now infer vendored `CommandAction[]` from the emitted shell command string instead of leaving the field empty.
 - Thread runtime states such as `starting`, `forking`, and `terminating` remain adapter-owned internally, but the published protocol surface now maps them to the upstream `ThreadStatus` union without custom active-flag values.
 - During normal active turn execution, published `ThreadStatus` now uses `activeFlags: []`; only upstream-supported flags such as `waitingOnUserInput` are surfaced externally.
 - Historical inline image inputs are normalized to vendored `UserInput` image URLs using `data:` URLs when only base64 payloads are available.
+- PI history normalization now preserves assistant `stopReason`/`errorMessage`, allowing `thread/resume` to rebuild failed turns with vendored `TurnError.codexErrorInfo`.
 
 ## Milestone 6: External Review Of Code Changes
 

@@ -1,5 +1,10 @@
 import type { ImageContent as VendoredPiImageContent } from "../../../types/pi/packages/ai/src/types.js";
 import type {
+  ToolExecutionEndEvent,
+  ToolExecutionStartEvent,
+  ToolExecutionUpdateEvent,
+} from "../../../types/pi/packages/coding-agent/src/core/extensions/types.js";
+import type {
   RpcExtensionUIRequest,
   RpcExtensionUIResponse,
 } from "../../../types/pi/packages/coding-agent/src/modes/rpc/rpc-types.js";
@@ -50,6 +55,29 @@ type LocalElicitationResponse =
   | { type: "extension_ui_response"; id: string; confirmed: boolean }
   | { type: "extension_ui_response"; id: string; cancelled: true };
 
+type LocalToolExecutionStartEvent = {
+  type: "tool_execution_start";
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+};
+
+type LocalToolExecutionUpdateEvent = {
+  type: "tool_execution_update";
+  toolCallId: string;
+  toolName: string;
+  args: unknown;
+  partialResult: unknown;
+};
+
+type LocalToolExecutionEndEvent = {
+  type: "tool_execution_end";
+  toolCallId: string;
+  toolName: string;
+  result: unknown;
+  isError: boolean;
+};
+
 type VendoredElicitationRequest = Extract<
   RpcExtensionUIRequest,
   { method: "select" | "confirm" | "input" | "editor" }
@@ -62,4 +90,10 @@ type PiVendoredTypesMatch = [
   AssertAssignable<VendoredElicitationRequest, LocalElicitationRequest>,
   AssertAssignable<LocalElicitationResponse, RpcExtensionUIResponse>,
   AssertAssignable<RpcExtensionUIResponse, LocalElicitationResponse>,
+  AssertAssignable<LocalToolExecutionStartEvent, ToolExecutionStartEvent>,
+  AssertAssignable<ToolExecutionStartEvent, LocalToolExecutionStartEvent>,
+  AssertAssignable<LocalToolExecutionUpdateEvent, ToolExecutionUpdateEvent>,
+  AssertAssignable<ToolExecutionUpdateEvent, LocalToolExecutionUpdateEvent>,
+  AssertAssignable<LocalToolExecutionEndEvent, ToolExecutionEndEvent>,
+  AssertAssignable<ToolExecutionEndEvent, LocalToolExecutionEndEvent>,
 ];

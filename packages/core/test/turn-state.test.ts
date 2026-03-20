@@ -113,6 +113,7 @@ describe("TurnStateMachine", () => {
           status: "completed",
           aggregatedOutput: "/repo",
           exitCode: 0,
+          commandActions: [{ type: "unknown", command: "pwd" }],
         },
       ],
     });
@@ -289,7 +290,7 @@ describe("TurnStateMachine", () => {
       status: "failed",
       error: {
         message: "backend failed",
-        codexErrorInfo: null,
+        codexErrorInfo: "other",
         additionalDetails: null,
       },
       items: [

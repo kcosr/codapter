@@ -37,6 +37,15 @@
           "source": "packages/coding-agent/src/modes/rpc/rpc-types.ts",
           "mode": "extract",
           "exports": ["RpcExtensionUIRequest", "RpcExtensionUIResponse"]
+        },
+        {
+          "source": "packages/coding-agent/src/core/extensions/types.ts",
+          "mode": "extract",
+          "exports": [
+            "ToolExecutionStartEvent",
+            "ToolExecutionUpdateEvent",
+            "ToolExecutionEndEvent"
+          ]
         }
       ],
       "entrypointPolicy": "Entrypoints are seeds; extraction mode is limited to standalone exported declarations needed for first-pass backend-pi adoption."

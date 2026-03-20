@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   isElicitationRequest,
   isRpcExtensionUIRequest,
+  isToolExecutionEndEvent,
+  isToolExecutionStartEvent,
+  isToolExecutionUpdateEvent,
+  mapBackendMessages,
   normalizeElicitationResponse,
 } from "../src/pi-process.js";
 
@@ -66,5 +70,82 @@ describe("pi-process vendored PI helpers", () => {
     expect(() => normalizeElicitationResponse("req-1", 123)).toThrow(
       "Unsupported Pi elicitation response shape"
     );
+  });
+
+  it("accepts vendored tool execution events", () => {
+    expect(
+      isToolExecutionStartEvent({
+        type: "tool_execution_start",
+        toolCallId: "tool-1",
+        toolName: "bash",
+        args: { command: "pwd" },
+      })
+    ).toBe(true);
+    expect(
+      isToolExecutionUpdateEvent({
+        type: "tool_execution_update",
+        toolCallId: "tool-1",
+        toolName: "bash",
+        args: { command: "pwd" },
+        partialResult: { content: [{ type: "text", text: "/repo" }] },
+      })
+    ).toBe(true);
+    expect(
+      isToolExecutionEndEvent({
+        type: "tool_execution_end",
+        toolCallId: "tool-1",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "/repo" }] },
+        isError: false,
+      })
+    ).toBe(true);
+  });
+
+  it("rejects malformed tool execution events", () => {
+    expect(
+      isToolExecutionStartEvent({
+        type: "tool_execution_start",
+        toolCallId: 1,
+        toolName: "bash",
+      })
+    ).toBe(false);
+    expect(
+      isToolExecutionUpdateEvent({
+        type: "tool_execution_update",
+        toolCallId: "tool-1",
+        toolName: "bash",
+      })
+    ).toBe(false);
+    expect(
+      isToolExecutionEndEvent({
+        type: "tool_execution_end",
+        toolCallId: "tool-1",
+        toolName: "bash",
+        result: {},
+        isError: "no",
+      })
+    ).toBe(false);
+  });
+
+  it("preserves assistant stop reasons and error messages in normalized history", () => {
+    expect(
+      mapBackendMessages([
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: [{ type: "text", text: "failed" }],
+          stopReason: "error",
+          errorMessage: "prompt is too long",
+          timestamp: Date.now(),
+        },
+      ])
+    ).toEqual([
+      expect.objectContaining({
+        id: "assistant-1",
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "prompt is too long",
+      }),
+    ]);
   });
 });

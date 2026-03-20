@@ -11,6 +11,11 @@ import type {
 } from "@codapter/core";
 import type { ImageContent as PiImageContent } from "../../../types/pi/packages/ai/src/types.js";
 import type {
+  ToolExecutionEndEvent as VendoredToolExecutionEndEvent,
+  ToolExecutionStartEvent as VendoredToolExecutionStartEvent,
+  ToolExecutionUpdateEvent as VendoredToolExecutionUpdateEvent,
+} from "../../../types/pi/packages/coding-agent/src/core/extensions/types.js";
+import type {
   RpcExtensionUIRequest,
   RpcExtensionUIResponse,
 } from "../../../types/pi/packages/coding-agent/src/modes/rpc/rpc-types.js";
@@ -31,6 +36,10 @@ export interface PiProcessResponse<T = unknown> {
   readonly data?: T;
   readonly error?: string;
 }
+
+type ToolExecutionStartEvent = VendoredToolExecutionStartEvent;
+type ToolExecutionUpdateEvent = VendoredToolExecutionUpdateEvent;
+type ToolExecutionEndEvent = VendoredToolExecutionEndEvent;
 
 export interface PiSessionStateSnapshot {
   readonly sessionId: string;
@@ -118,6 +127,36 @@ function defaultArgs(sessionDir: string): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export function isToolExecutionStartEvent(value: unknown): value is ToolExecutionStartEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_start" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string"
+  );
+}
+
+export function isToolExecutionUpdateEvent(value: unknown): value is ToolExecutionUpdateEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_update" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string" &&
+    "partialResult" in value
+  );
+}
+
+export function isToolExecutionEndEvent(value: unknown): value is ToolExecutionEndEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_end" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string" &&
+    typeof value.isError === "boolean" &&
+    "result" in value
+  );
 }
 
 export function isRpcExtensionUIRequest(value: unknown): value is RpcExtensionUIRequest {
@@ -324,6 +363,8 @@ function mapMessage(message: unknown, index: number): BackendMessage {
           ? structuredClone(record.content)
           : structuredClone(record),
     createdAt: timestamp,
+    ...(typeof record.stopReason === "string" ? { stopReason: record.stopReason } : {}),
+    ...(typeof record.errorMessage === "string" ? { errorMessage: record.errorMessage } : {}),
   };
 }
 
@@ -727,35 +768,44 @@ export class PiProcessSession {
         });
         return;
       case "tool_execution_start":
+        if (!isToolExecutionStartEvent(event)) {
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_start",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
           input: event.args,
         });
         return;
       case "tool_execution_update":
+        if (!isToolExecutionUpdateEvent(event)) {
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_update",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
           output: event.partialResult,
           isCumulative: true,
         });
         return;
       case "tool_execution_end":
+        if (!isToolExecutionEndEvent(event)) {
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_end",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
           output: event.result,
-          isError: Boolean(event.isError),
+          isError: event.isError,
         });
         return;
       case "extension_ui_request":
