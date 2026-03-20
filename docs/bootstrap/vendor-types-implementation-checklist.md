@@ -290,12 +290,14 @@ Validation note:
 - [x] Stop emitting non-upstream thread active flags and restrict status output to valid vendored values
 - [x] Surface `waitingOnUserInput` when a tool-user-input request is pending
 - [x] Stop emitting non-upstream `"interrupted"` item statuses for in-flight tool items
+- [x] Centralize live and historical tool classification behind one shared core helper
 
 ### F.4 Validation
 
 - [x] Add resumed-history coverage for inline image/user-input normalization
 - [x] Add resumed-history coverage for vendored file-change normalization
 - [x] Add direct unit coverage for interrupted in-flight tool items under the vendored item union
+- [x] Add direct unit coverage for reasoning/text streaming, command streaming, and unknown-tool fallback in `TurnStateMachine`
 - [x] Re-run `npm run vendor-types`
 - [x] Re-run `npm run lint`
 - [x] Re-run `npm run build`

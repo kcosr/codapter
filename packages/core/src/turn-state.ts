@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
 import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
+import { classifyToolName } from "./tool-kind.js";
 
 export interface TurnStateNotificationSink {
   notify(method: string, params: unknown): Promise<void>;
@@ -126,16 +127,6 @@ function toFileUpdateChanges(value: unknown): FileUpdateChange[] {
   });
 }
 
-function toolItemKind(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
-}
-
 export class TurnStateMachine {
   private readonly turn: Turn;
   private readonly items = new Map<string, ThreadItem>();
@@ -253,7 +244,7 @@ export class TurnStateMachine {
     input: unknown
   ): Promise<void> {
     const id = randomUUID();
-    const kind = toolItemKind(toolName);
+    const kind = classifyToolName(toolName);
     const item: ThreadItem =
       kind === "commandExecution"
         ? {

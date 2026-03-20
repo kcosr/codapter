@@ -99,6 +99,7 @@ import {
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
+import { classifyToolName } from "./tool-kind.js";
 import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
@@ -524,16 +525,6 @@ function commandFromToolArguments(input: unknown): string {
   return "";
 }
 
-function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
-}
-
 function thinkingSummaryFromSignature(signature: string): string | null {
   try {
     const parsed = JSON.parse(signature);
@@ -721,7 +712,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
             typeof block.id === "string" && block.id.length > 0
               ? block.id
               : `${message.id}_tool_${index}`;
-          const toolKind = toolKindFromName(toolName);
+          const toolKind = classifyToolName(toolName);
           const item: ThreadItem =
             toolKind === "commandExecution"
               ? {
@@ -798,7 +789,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
         continue;
       }
 
-      const toolKind = toolKindFromName(toolName);
+      const toolKind = classifyToolName(toolName);
       if (toolKind === "commandExecution") {
         turn.items.push({
           type: "commandExecution",

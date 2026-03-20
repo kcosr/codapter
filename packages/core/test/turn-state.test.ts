@@ -10,6 +10,119 @@ class TestSink {
 }
 
 describe("TurnStateMachine", () => {
+  it("streams reasoning and assistant text into vendored items", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "thinking_delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      delta: "plan",
+    });
+    await machine.handleEvent({
+      type: "thinking_delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      delta: " more",
+    });
+    await machine.handleEvent({
+      type: "text_delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      delta: "hello",
+    });
+    await machine.handleEvent({
+      type: "text_delta",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      delta: " world",
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      status: "completed",
+      items: [
+        {
+          type: "reasoning",
+          summary: ["plan more"],
+          content: [],
+        },
+        {
+          type: "agentMessage",
+          text: "hello world",
+          phase: null,
+          memoryCitation: null,
+        },
+      ],
+    });
+  });
+
+  it("streams command execution output and completes with vendored fields", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      input: { command: ["pwd"] },
+    });
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo" }] },
+      isCumulative: false,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_cmd",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo\n" }] },
+      isError: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      status: "completed",
+      items: [
+        {
+          type: "commandExecution",
+          command: "pwd",
+          cwd: "/repo",
+          source: "agent",
+          status: "completed",
+          aggregatedOutput: "/repo",
+          exitCode: 0,
+        },
+      ],
+    });
+    expect(
+      sink.notifications.some(
+        (notification) => notification.method === "item/commandExecution/outputDelta"
+      )
+    ).toBe(true);
+  });
+
   it("marks in-flight tool items as failed when the turn is interrupted", async () => {
     const sink = new TestSink();
     const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
@@ -98,6 +211,56 @@ describe("TurnStateMachine", () => {
               diff: "@@ -1 +1 @@\n-old\n+new\n",
             },
           ],
+        },
+      ],
+    });
+  });
+
+  it("falls back to agentMessage for unknown tools", async () => {
+    const sink = new TestSink();
+    const machine = new TurnStateMachine("thread_1", "turn_1", "/repo", sink);
+
+    await machine.emitStarted();
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_unknown",
+      toolName: "search_web",
+      input: {},
+    });
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_unknown",
+      toolName: "search_web",
+      output: { content: [{ type: "text", text: "result" }] },
+      isCumulative: false,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+      toolCallId: "tool_unknown",
+      toolName: "search_web",
+      output: { content: [{ type: "text", text: "result" }] },
+      isError: false,
+    });
+
+    const completed = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session_1",
+      turnId: "turn_1",
+    });
+
+    expect(completed).toMatchObject({
+      status: "completed",
+      items: [
+        {
+          type: "agentMessage",
+          text: "result",
+          memoryCitation: null,
         },
       ],
     });
