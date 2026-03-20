@@ -11,8 +11,10 @@ import type {
 } from "@codapter/core";
 import { classifyToolName } from "@codapter/core";
 import type {
+  AssistantMessage as PiAssistantMessage,
   AssistantMessageEvent as PiAssistantMessageEvent,
   ImageContent as PiImageContent,
+  Usage as PiUsage,
 } from "../../../types/pi/packages/ai/src/types.js";
 import type {
   ToolExecutionEndEvent as VendoredToolExecutionEndEvent,
@@ -44,7 +46,9 @@ export interface PiProcessResponse<T = unknown> {
 type ToolExecutionStartEvent = VendoredToolExecutionStartEvent;
 type ToolExecutionUpdateEvent = VendoredToolExecutionUpdateEvent;
 type ToolExecutionEndEvent = VendoredToolExecutionEndEvent;
+type AssistantMessage = PiAssistantMessage;
 type AssistantMessageEvent = PiAssistantMessageEvent;
+type Usage = PiUsage;
 
 export interface PiSessionStateSnapshot {
   readonly sessionId: string;
@@ -134,6 +138,85 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isStopReason(value: unknown): value is AssistantMessage["stopReason"] {
+  return (
+    value === "stop" ||
+    value === "length" ||
+    value === "toolUse" ||
+    value === "error" ||
+    value === "aborted"
+  );
+}
+
+function isAssistantContentItem(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  switch (value.type) {
+    case "text":
+      return typeof value.text === "string";
+    case "thinking":
+      return typeof value.thinking === "string";
+    case "toolCall":
+      return (
+        typeof value.id === "string" && typeof value.name === "string" && isRecord(value.arguments)
+      );
+    default:
+      return false;
+  }
+}
+
+function isToolCallContentItem(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.type === "toolCall" &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isRecord(value.arguments)
+  );
+}
+
+export function isUsage(value: unknown): value is Usage {
+  if (!isRecord(value) || !isRecord(value.cost)) {
+    return false;
+  }
+
+  return (
+    isFiniteNumber(value.input) &&
+    isFiniteNumber(value.output) &&
+    isFiniteNumber(value.cacheRead) &&
+    isFiniteNumber(value.cacheWrite) &&
+    isFiniteNumber(value.totalTokens) &&
+    isFiniteNumber(value.cost.input) &&
+    isFiniteNumber(value.cost.output) &&
+    isFiniteNumber(value.cost.cacheRead) &&
+    isFiniteNumber(value.cost.cacheWrite) &&
+    isFiniteNumber(value.cost.total)
+  );
+}
+
+export function isAssistantMessage(value: unknown): value is AssistantMessage {
+  return (
+    isRecord(value) &&
+    value.role === "assistant" &&
+    Array.isArray(value.content) &&
+    value.content.every((entry) => isAssistantContentItem(entry)) &&
+    typeof value.api === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.model === "string" &&
+    isUsage(value.usage) &&
+    isStopReason(value.stopReason) &&
+    isFiniteNumber(value.timestamp) &&
+    (value.responseId === undefined || typeof value.responseId === "string") &&
+    (value.errorMessage === undefined || typeof value.errorMessage === "string")
+  );
+}
+
 export function isToolExecutionStartEvent(value: unknown): value is ToolExecutionStartEvent {
   return (
     isRecord(value) &&
@@ -171,40 +254,43 @@ export function isAssistantMessageEvent(value: unknown): value is AssistantMessa
 
   switch (value.type) {
     case "start":
-      return isRecord(value.partial);
+      return isAssistantMessage(value.partial);
     case "text_start":
     case "thinking_start":
     case "toolcall_start":
-      return typeof value.contentIndex === "number" && isRecord(value.partial);
+      return typeof value.contentIndex === "number" && isAssistantMessage(value.partial);
     case "text_delta":
     case "thinking_delta":
     case "toolcall_delta":
       return (
         typeof value.contentIndex === "number" &&
         typeof value.delta === "string" &&
-        isRecord(value.partial)
+        isAssistantMessage(value.partial)
       );
     case "text_end":
     case "thinking_end":
       return (
         typeof value.contentIndex === "number" &&
         typeof value.content === "string" &&
-        isRecord(value.partial)
+        isAssistantMessage(value.partial)
       );
     case "toolcall_end":
       return (
-        typeof value.contentIndex === "number" && "toolCall" in value && isRecord(value.partial)
+        typeof value.contentIndex === "number" &&
+        isToolCallContentItem(value.toolCall) &&
+        isAssistantMessage(value.partial)
       );
     case "done":
       return (
         (value.reason === "stop" || value.reason === "length" || value.reason === "toolUse") &&
-        isRecord(value.message)
+        isAssistantMessage(value.message) &&
+        value.message.stopReason === value.reason
       );
     case "error":
       return (
         (value.reason === "aborted" || value.reason === "error") &&
-        isRecord(value.error) &&
-        (value.error.errorMessage === undefined || typeof value.error.errorMessage === "string")
+        isAssistantMessage(value.error) &&
+        value.error.stopReason === value.reason
       );
     default:
       return false;
@@ -262,8 +348,29 @@ function normalizeModelKey(provider: string, id: string): string {
   return `${provider}/${id}`;
 }
 
-function mapTokenUsage(stats: unknown): BackendTokenUsage {
+export function mapTokenUsage(stats: unknown): BackendTokenUsage {
   const record = isRecord(stats) ? stats : {};
+  const usage =
+    (isUsage(record.tokens) ? record.tokens : null) ??
+    (isUsage(record.tokenUsage) ? record.tokenUsage : null) ??
+    (isUsage((record as { token_usage?: unknown }).token_usage)
+      ? (record as { token_usage?: Usage }).token_usage
+      : null) ??
+    (isUsage((record as { statistics?: unknown }).statistics)
+      ? (record as { statistics?: Usage }).statistics
+      : null);
+
+  if (usage) {
+    return {
+      input: usage.input,
+      output: usage.output,
+      cacheRead: usage.cacheRead,
+      cacheWrite: usage.cacheWrite,
+      total: usage.totalTokens,
+      modelContextWindow: null,
+    };
+  }
+
   const tokens = isRecord(record.tokens)
     ? record.tokens
     : isRecord(record.tokenUsage)
@@ -390,6 +497,17 @@ function mapUpstreamModel(model: unknown, index: number): BackendModelSummary | 
 }
 
 function mapMessage(message: unknown, index: number): BackendMessage {
+  if (isAssistantMessage(message)) {
+    return {
+      id: `message-${index}`,
+      role: message.role,
+      content: structuredClone(message.content),
+      createdAt: new Date(message.timestamp).toISOString(),
+      stopReason: message.stopReason,
+      ...(message.errorMessage ? { errorMessage: message.errorMessage } : {}),
+    };
+  }
+
   const record = isRecord(message) ? message : {};
   const timestamp =
     typeof record.timestamp === "number"
@@ -421,6 +539,9 @@ function mapMessage(message: unknown, index: number): BackendMessage {
 }
 
 function messageRole(message: unknown): string | null {
+  if (isAssistantMessage(message)) {
+    return message.role;
+  }
   if (!isRecord(message) || typeof message.role !== "string") {
     return null;
   }
@@ -428,6 +549,9 @@ function messageRole(message: unknown): string | null {
 }
 
 function messageStopReason(message: unknown): string | null {
+  if (isAssistantMessage(message)) {
+    return message.stopReason;
+  }
   if (!isRecord(message) || typeof message.stopReason !== "string") {
     return null;
   }

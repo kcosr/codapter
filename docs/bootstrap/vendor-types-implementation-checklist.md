@@ -183,6 +183,8 @@ Comparison results:
 Adopted PI types for this pass:
 
 - `ImageContent`
+- `Usage`
+- `AssistantMessage`
 - `AssistantMessageEvent`
 - `RpcExtensionUIRequest`
 - `RpcExtensionUIResponse`
@@ -386,8 +388,23 @@ Review notes for the latest follow-on change:
     - the workflow file is included in the milestone commit
     - the fallback checklist line now explicitly says it documents the no-network fallback
     - the workflow reference now uses `.github/workflows/ci.yml` instead of a machine-local absolute path
+- Explicit deferrals from that review:
+  - the workflow still triggers on all pushes and pull requests; narrowing trigger scope is left as a future CI-cost optimization if needed
+- Review notes for the vendored `AssistantMessage` / `Usage` follow-on slice:
+  - Gemini review found no blocking issues and noted two non-blocking strictness tradeoffs:
+    - `isUsage` now intentionally rejects assistant/usage payloads that omit vendored fields such as `cost`
+    - `isAssistantMessageEvent` now intentionally rejects `done`/`error` events when the event reason disagrees with the embedded message `stopReason`
+  - PI review flagged three actionable follow-ups:
+    - add a direct unit test for the vendored `Usage` fast path in `mapTokenUsage`
+    - add more negative coverage for missing required assistant-message fields and invalid content items
+    - keep in mind that strict vendored guards will drop streaming events if PI starts emitting partially conformant assistant payloads
+  - Accepted fixes from that review:
+    - added a direct `mapTokenUsage({ tokens: usage })` unit test
+    - added negative assistant-message coverage for missing `api` and invalid content item shapes
+    - updated the helper fixture to include real vendored `text`, `thinking`, and `toolCall` content items so the positive guard path exercises more than an empty array
   - Explicit deferrals from that review:
-    - the workflow still triggers on all pushes and pull requests; narrowing trigger scope is left as a future CI-cost optimization if needed
+    - no compatibility fallback was added for assistant event payloads that partially resemble vendored `AssistantMessage`; malformed streaming events still log and drop instead of being reinterpreted heuristically
+    - optional assistant-content metadata fields such as `textSignature`, `thinkingSignature`, `redacted`, and `thoughtSignature` are preserved when present but not individually validated by the runtime guards
 
 **Done when**: both external reviews have been completed on the implementation, and accepted findings are either fixed or explicitly deferred.
 

@@ -1,4 +1,8 @@
-import type { ImageContent as VendoredPiImageContent } from "../../../types/pi/packages/ai/src/types.js";
+import type {
+  AssistantMessage as VendoredAssistantMessage,
+  ImageContent as VendoredPiImageContent,
+  Usage as VendoredUsage,
+} from "../../../types/pi/packages/ai/src/types.js";
 import type {
   ToolExecutionEndEvent,
   ToolExecutionStartEvent,
@@ -15,6 +19,38 @@ type LocalPiImageContent = {
   type: "image";
   data: string;
   mimeType: string;
+};
+
+type LocalUsage = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+  cost: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    total: number;
+  };
+};
+
+type LocalAssistantMessage = {
+  role: "assistant";
+  content: (
+    | { type: "text"; text: string }
+    | { type: "thinking"; thinking: string }
+    | { type: "toolCall"; id: string; name: string; arguments: Record<string, unknown> }
+  )[];
+  api: string;
+  provider: string;
+  model: string;
+  usage: LocalUsage;
+  stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
+  errorMessage?: string;
+  responseId?: string;
+  timestamp: number;
 };
 
 type LocalElicitationRequest =
@@ -86,6 +122,10 @@ type VendoredElicitationRequest = Extract<
 type PiVendoredTypesMatch = [
   AssertAssignable<LocalPiImageContent, VendoredPiImageContent>,
   AssertAssignable<VendoredPiImageContent, LocalPiImageContent>,
+  AssertAssignable<LocalUsage, VendoredUsage>,
+  AssertAssignable<VendoredUsage, LocalUsage>,
+  AssertAssignable<LocalAssistantMessage, VendoredAssistantMessage>,
+  AssertAssignable<VendoredAssistantMessage, LocalAssistantMessage>,
   AssertAssignable<LocalElicitationRequest, VendoredElicitationRequest>,
   AssertAssignable<VendoredElicitationRequest, LocalElicitationRequest>,
   AssertAssignable<LocalElicitationResponse, RpcExtensionUIResponse>,

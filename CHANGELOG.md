@@ -47,6 +47,7 @@
 - Fatal backend turn failures now publish vendored `ThreadStatus.systemError`, both `thread/resume` and `thread/fork` can recover from persisted state after those crashes, and successful resume/fork responses no longer transiently report `active` while the runtime is already ready.
 - Extended vendoring extract mode to include same-file type dependencies, fail loudly on imported type references, and used it to vendor PI `AssistantMessageEvent`, replacing ad hoc assistant message update parsing in `packages/backend-pi`.
 - Added a checked-in GitHub Actions workflow that runs `npm run vendor-types` before build and tests so CI matches the gitignored vendored-output policy.
+- Tightened PI normalization to validate vendored `AssistantMessage` and `Usage` payloads directly, prefer vendored usage shapes in token stats, and normalize vendored assistant history/messages without falling back to ad hoc field probing when the upstream shape is present.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.

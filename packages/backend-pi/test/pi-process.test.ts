@@ -1,19 +1,26 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAssistantMessage,
   isAssistantMessageEvent,
   isElicitationRequest,
   isRpcExtensionUIRequest,
   isToolExecutionEndEvent,
   isToolExecutionStartEvent,
   isToolExecutionUpdateEvent,
+  isUsage,
   mapBackendMessages,
+  mapTokenUsage,
   normalizeElicitationResponse,
 } from "../src/pi-process.js";
 
 describe("pi-process vendored PI helpers", () => {
   const assistantMessage = {
     role: "assistant",
-    content: [],
+    content: [
+      { type: "text" as const, text: "hello" },
+      { type: "thinking" as const, thinking: "considering" },
+      { type: "toolCall" as const, id: "tool-1", name: "bash", arguments: { command: "pwd" } },
+    ],
     api: "openai-codex-responses",
     provider: "openai-codex",
     model: "gpt-5.3-codex",
@@ -121,6 +128,8 @@ describe("pi-process vendored PI helpers", () => {
   });
 
   it("accepts vendored assistant message events", () => {
+    expect(isUsage(assistantMessage.usage)).toBe(true);
+    expect(isAssistantMessage(assistantMessage)).toBe(true);
     expect(
       isAssistantMessageEvent({
         type: "start",
@@ -156,11 +165,22 @@ describe("pi-process vendored PI helpers", () => {
         reason: "aborted",
         error: {
           ...assistantMessage,
-          stopReason: "error",
+          stopReason: "aborted",
           errorMessage: "nested failure",
         },
       })
     ).toBe(true);
+  });
+
+  it("maps vendored usage payloads directly", () => {
+    expect(mapTokenUsage({ tokens: assistantMessage.usage })).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+      modelContextWindow: null,
+    });
   });
 
   it("rejects malformed tool execution events", () => {
@@ -214,6 +234,37 @@ describe("pi-process vendored PI helpers", () => {
       })
     ).toBe(false);
     expect(
+      isAssistantMessage({
+        ...assistantMessage,
+        api: undefined,
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessage({
+        ...assistantMessage,
+        content: [{ type: "image", data: "nope" }],
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessage({
+        ...assistantMessage,
+        usage: { ...assistantMessage.usage, totalTokens: "bad" },
+      })
+    ).toBe(false);
+    expect(
+      isUsage({
+        ...assistantMessage.usage,
+        cost: { ...assistantMessage.usage.cost, total: "bad" },
+      })
+    ).toBe(false);
+    expect(
+      isAssistantMessageEvent({
+        type: "done",
+        reason: "stop",
+        message: { ...assistantMessage, stopReason: "length" },
+      })
+    ).toBe(false);
+    expect(
       isAssistantMessageEvent({
         type: "unknown_event",
         partial: assistantMessage,
@@ -225,18 +276,17 @@ describe("pi-process vendored PI helpers", () => {
     expect(
       mapBackendMessages([
         {
-          id: "assistant-1",
-          role: "assistant",
+          ...assistantMessage,
           content: [{ type: "text", text: "failed" }],
           stopReason: "error",
           errorMessage: "prompt is too long",
-          timestamp: Date.now(),
         },
       ])
     ).toEqual([
       expect.objectContaining({
-        id: "assistant-1",
+        id: "message-0",
         role: "assistant",
+        content: [{ type: "text", text: "failed" }],
         stopReason: "error",
         errorMessage: "prompt is too long",
       }),
