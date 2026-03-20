@@ -34,6 +34,11 @@
 
 ### Added
 
+- Added manifest-driven vendored type generation via `npm run vendor-types` with pinned Codex and Pi upstream commits.
+- Added build preflight checks so missing vendored output fails with a clear bootstrap error.
+- Adopted vendored Codex `GitInfo` in `packages/core` with compile-time compatibility checks.
+- Adopted targeted vendored Pi `ImageContent`, `RpcExtensionUIRequest`, and `RpcExtensionUIResponse` types only inside `packages/backend-pi`.
+- Added vendoring-script validation coverage, PI helper unit tests, and documented vendored-type bootstrap policy.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.
