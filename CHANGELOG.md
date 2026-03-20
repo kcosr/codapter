@@ -39,6 +39,7 @@
 - Adopted vendored Codex `GitInfo` in `packages/core` with compile-time compatibility checks.
 - Adopted targeted vendored Pi `ImageContent`, `RpcExtensionUIRequest`, and `RpcExtensionUIResponse` types only inside `packages/backend-pi`.
 - Added vendoring-script validation coverage, PI helper unit tests, and documented vendored-type bootstrap policy.
+- Replaced local core `SessionSource`, `ThreadStatus`, `UserInput`, `ThreadItem`, `TurnStatus`, `TurnError`, `Turn`, and `Thread` protocol types with vendored Codex declarations and aligned adapter output to the upstream-required shapes.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.

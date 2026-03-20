@@ -1,4 +1,12 @@
 import type { GitInfo as VendoredGitInfo } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/GitInfo.js";
+import type { SessionSource as VendoredSessionSource } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/SessionSource.js";
+import type { Thread as VendoredThread } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/Thread.js";
+import type { ThreadItem as VendoredThreadItem } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem.js";
+import type { ThreadStatus as VendoredThreadStatus } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/ThreadStatus.js";
+import type { Turn as VendoredTurn } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/Turn.js";
+import type { TurnError as VendoredTurnError } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/TurnError.js";
+import type { TurnStatus as VendoredTurnStatus } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/TurnStatus.js";
+import type { UserInput as VendoredUserInput } from "../../../types/codex/codex-rs/app-server-protocol/schema/typescript/v2/UserInput.js";
 import type { JsonRpcId } from "./jsonrpc.js";
 
 export type ClientInfo = {
@@ -338,51 +346,17 @@ export type ModelListResponse = {
 
 export type GitInfo = VendoredGitInfo;
 
-export type ThreadStatus =
-  | { type: "notLoaded" }
-  | { type: "idle" }
-  | { type: "systemError" }
-  | { type: "active"; activeFlags: string[] };
+export type ThreadStatus = VendoredThreadStatus;
 
-export type UserInput =
-  | { type: "text"; text: string; text_elements: JsonValue[] }
-  | { type: "image"; url: string }
-  | { type: "localImage"; path: string }
-  | { type: "skill"; name: string; path: string }
-  | { type: "mention"; name: string; path: string };
+export type UserInput = VendoredUserInput;
 
-export type ThreadItem =
-  | { type: "userMessage"; id: string; content: JsonValue[] }
-  | { type: "agentMessage"; id: string; text: string; phase: string | null }
-  | { type: "reasoning"; id: string; summary: string[]; content: string[] }
-  | {
-      type: "commandExecution";
-      id: string;
-      command: string;
-      cwd: string;
-      processId: string | null;
-      status: string;
-      commandActions: JsonValue[];
-      aggregatedOutput: string | null;
-      exitCode: number | null;
-      durationMs: number | null;
-    }
-  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string };
+export type ThreadItem = VendoredThreadItem;
 
-export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
+export type TurnStatus = VendoredTurnStatus;
 
-export type TurnError = {
-  message: string;
-  codexErrorInfo: JsonValue | null;
-  additionalDetails: string | null;
-};
+export type TurnError = VendoredTurnError;
 
-export type Turn = {
-  id: string;
-  items: ThreadItem[];
-  status: TurnStatus;
-  error: TurnError | null;
-};
+export type Turn = VendoredTurn;
 
 export type TurnStartParams = {
   threadId: string;
@@ -411,26 +385,9 @@ export type TurnInterruptParams = {
 
 export type TurnInterruptResponse = Record<string, never>;
 
-export type SessionSource = "appServer";
+export type SessionSource = VendoredSessionSource;
 
-export type Thread = {
-  id: string;
-  preview: string;
-  ephemeral: boolean;
-  modelProvider: string;
-  createdAt: number;
-  updatedAt: number;
-  status: ThreadStatus;
-  path: string | null;
-  cwd: string;
-  cliVersion: string;
-  source: SessionSource;
-  agentNickname: string | null;
-  agentRole: string | null;
-  gitInfo: GitInfo | null;
-  name: string | null;
-  turns: Turn[];
-};
+export type Thread = VendoredThread;
 
 export type ThreadStartParams = {
   model?: string | null;

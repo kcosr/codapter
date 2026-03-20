@@ -2,6 +2,20 @@
 
 Date: 2026-03-19
 
+## Update: Follow-on Pass Outcome
+
+The first-pass recommendation below was implemented as planned, and a follow-on Codex protocol pass is now complete in this repo:
+
+- `packages/core/src/protocol.ts` now aliases vendored Codex `SessionSource`, `ThreadStatus`, `UserInput`, `ThreadItem`, `TurnStatus`, `TurnError`, `Turn`, and `Thread`.
+- The adapter was updated so its emitted values match the upstream-required shapes instead of preserving reduced local unions.
+- The concrete extra fields required by the pinned upstream Codex graph were:
+  - `agentMessage.memoryCitation`
+  - `commandExecution.source`
+- Historical user content and file-change items are now normalized to the vendored Codex contracts during thread reconstruction.
+- Thread status publication now uses only upstream-valid `ThreadStatus` variants and sets `waitingOnUserInput` while PI elicitation is pending.
+
+The first-pass cautions below remain useful as design history, but the "do not replace `ThreadItem` / `Turn` / `Thread`" guidance has now been intentionally superseded by explicit adapter work.
+
 ## Scope
 
 Review the proposed "Vendor Codex and Pi type definitions" request and recommend what should actually be implemented in this repository.

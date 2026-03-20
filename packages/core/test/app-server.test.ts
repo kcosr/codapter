@@ -1114,7 +1114,7 @@ describe("AppServerConnection", () => {
                 items: [
                   {
                     type: "userMessage",
-                    content: [{ type: "text", text: "run pwd" }],
+                    content: [{ type: "text", text: "run pwd", text_elements: [] }],
                   },
                   {
                     type: "reasoning",
@@ -1124,6 +1124,7 @@ describe("AppServerConnection", () => {
                     type: "commandExecution",
                     command: "pwd",
                     cwd: "/repo",
+                    source: "agent",
                     status: "completed",
                     aggregatedOutput: "/home/kevin\n",
                     exitCode: 0,
@@ -1131,6 +1132,7 @@ describe("AppServerConnection", () => {
                   {
                     type: "agentMessage",
                     text: "`pwd` -> `/home/kevin`",
+                    memoryCitation: null,
                   },
                 ],
               },
@@ -1138,6 +1140,109 @@ describe("AppServerConnection", () => {
           },
         },
       });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes resumed inline images and file changes to vendored Codex shapes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend();
+    const entry = await threadRegistry.create({
+      backendSessionId: "session_1",
+      backendType: "pi",
+      cwd: "/repo",
+      preview: "edit main.ts",
+      modelProvider: "pi",
+      gitInfo: null,
+    });
+    backend.sessionHistories.set("session_1", [
+      {
+        id: "user-1",
+        role: "user",
+        content: [
+          { type: "text", text: "edit main.ts", text_elements: [] },
+          { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+        ],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "tool-1",
+            name: "file_edit",
+            arguments: { path: "main.ts" },
+          },
+        ],
+        createdAt: new Date().toISOString(),
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        content: {
+          role: "toolResult",
+          toolCallId: "tool-1",
+          toolName: "file_edit",
+          content: [
+            {
+              path: "main.ts",
+              kind: { type: "update", move_path: null },
+              diff: "@@ -1 +1 @@\n-old\n+new\n",
+            },
+          ],
+          isError: false,
+        },
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const resumed = (await connection.handleMessage({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: entry.threadId,
+          persistExtendedHistory: false,
+        },
+      })) as { result: { thread: { turns: Array<{ items: unknown[] }> } } };
+
+      expect(resumed.result.thread.turns[0]?.items).toMatchObject([
+        {
+          type: "userMessage",
+          content: [
+            { type: "text", text: "edit main.ts", text_elements: [] },
+            { type: "image", url: "data:image/png;base64,aGVsbG8=" },
+          ],
+        },
+        {
+          type: "fileChange",
+          status: "completed",
+          changes: [
+            {
+              path: "main.ts",
+              kind: { type: "update", move_path: null },
+              diff: "@@ -1 +1 @@\n-old\n+new\n",
+            },
+          ],
+        },
+      ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -1395,6 +1500,15 @@ describe("AppServerConnection", () => {
         | { id: string | number; params: { questions: Array<{ id: string }> } }
         | undefined;
       expect(request).toBeDefined();
+      expect(
+        outgoing.some(
+          (message) =>
+            message.method === "thread/status/changed" &&
+            (message.params as { status?: unknown } | undefined)?.status &&
+            JSON.stringify((message.params as { status?: unknown }).status) ===
+              JSON.stringify({ type: "active", activeFlags: ["waitingOnUserInput"] })
+        )
+      ).toBe(true);
 
       const questionId = request?.params.questions[0]?.id;
       await connection.handleMessage({

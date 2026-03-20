@@ -201,6 +201,7 @@ export class TurnStateMachine {
             command: inferCommand(input),
             cwd: this.cwd,
             processId: null,
+            source: "agent",
             status: "inProgress",
             commandActions: [],
             aggregatedOutput: null,
@@ -219,6 +220,7 @@ export class TurnStateMachine {
               id,
               text: "",
               phase: null,
+              memoryCitation: null,
             };
 
     await this.storeItem(item);
@@ -317,6 +319,7 @@ export class TurnStateMachine {
       id: randomUUID(),
       text: "",
       phase: null,
+      memoryCitation: null,
     };
     this.agentMessageItemId = item.id;
     await this.storeItem(item);
@@ -377,11 +380,17 @@ export class TurnStateMachine {
     }
     for (const [toolCallId, state] of this.toolStates) {
       if (state.item.type === "commandExecution") {
-        state.item.status = status === "interrupted" ? "interrupted" : state.item.status;
+        if (status === "interrupted" && state.item.status === "inProgress") {
+          state.item.status = "failed";
+        }
         state.item.durationMs = Date.now() - state.startedAt;
       }
-      if (state.item.type === "fileChange" && status === "interrupted") {
-        state.item.status = "interrupted";
+      if (
+        state.item.type === "fileChange" &&
+        status === "interrupted" &&
+        state.item.status === "inProgress"
+      ) {
+        state.item.status = "failed";
       }
       await this.completeItem(state.item.id);
       this.toolStates.delete(toolCallId);

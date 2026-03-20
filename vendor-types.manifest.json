@@ -16,7 +16,7 @@
       "license": "Apache-2.0",
       "entrypoints": [
         {
-          "source": "codex-rs/app-server-protocol/schema/typescript/v2/GitInfo.ts",
+          "source": "codex-rs/app-server-protocol/schema/typescript/v2/Thread.ts",
           "mode": "copy"
         }
       ],

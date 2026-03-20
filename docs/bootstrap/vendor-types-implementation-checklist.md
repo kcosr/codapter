@@ -18,6 +18,11 @@ Implement a narrow first pass of vendored Codex and PI type definitions that:
 - Do not add backward-compatibility fallbacks for multiple vendoring layouts.
 - Do not widen scope into a full protocol refactor just because vendored types are available.
 
+Note:
+
+- The non-goals above applied to the initial first pass.
+- The follow-on section below tracks the broader Codex protocol replacement once adapter changes were explicitly approved.
+
 ## Decisions To Lock Before Coding
 
 - [x] Assign an owner for policy decisions and capture the final resolution in this checklist or a linked ADR
@@ -257,6 +262,51 @@ Validation note:
   - decision: manual review is sufficient for this pass because only two direct vendored import sites were introduced and both compile successfully under the existing package boundaries.
 
 **Done when**: vendoring is part of the normal green path, not a one-off manual step.
+
+## Follow-on Pass: Full Codex Thread Adoption
+
+### F.1 Vendored Codex Graph
+
+- [x] Expand the Codex manifest seed from a single leaf file to the upstream `Thread.ts` graph
+- [x] Regenerate the vendored Codex declaration closure from the manifest-only update path
+- [x] Keep the vendored output policy unchanged: generated declarations remain gitignored
+
+### F.2 Protocol Replacement
+
+- [x] Replace local `SessionSource` with the vendored Codex type
+- [x] Replace local `ThreadStatus` with the vendored Codex type
+- [x] Replace local `UserInput` with the vendored Codex type
+- [x] Replace local `ThreadItem` with the vendored Codex type
+- [x] Replace local `TurnStatus` and `TurnError` with vendored Codex types
+- [x] Replace local `Turn` and `Thread` with vendored Codex types
+- [x] Expand compile-only compatibility checks to cover the full adopted set
+
+### F.3 Adapter Alignment
+
+- [x] Update historical thread reconstruction to emit vendored `UserInput[]` for user messages
+- [x] Update historical file tool items to emit vendored `FileUpdateChange[]`
+- [x] Update agent message items to include the vendored `memoryCitation` field
+- [x] Update command execution items to include the vendored `source` field
+- [x] Stop emitting non-upstream thread active flags and restrict status output to valid vendored values
+- [x] Surface `waitingOnUserInput` when a tool-user-input request is pending
+- [x] Stop emitting non-upstream `"interrupted"` item statuses for in-flight tool items
+
+### F.4 Validation
+
+- [x] Add resumed-history coverage for inline image/user-input normalization
+- [x] Add resumed-history coverage for vendored file-change normalization
+- [x] Add direct unit coverage for interrupted in-flight tool items under the vendored item union
+- [x] Re-run `npm run vendor-types`
+- [x] Re-run `npm run lint`
+- [x] Re-run `npm run build`
+- [x] Re-run `npm test`
+- [x] Re-run `npm run test:smoke`
+
+Follow-on implementation notes:
+
+- Upstream Codex `ThreadItem` at the pinned commit now requires `agentMessage.memoryCitation` and `commandExecution.source`; the adapter now emits those fields directly instead of preserving reduced local variants.
+- Thread runtime states such as `starting`, `forking`, and `terminating` remain adapter-owned internally, but the published protocol surface now maps them to the upstream `ThreadStatus` union without custom active-flag values.
+- Historical inline image inputs are normalized to vendored `UserInput` image URLs using `data:` URLs when only base64 payloads are available.
 
 ## Milestone 6: External Review Of Code Changes
 
