@@ -734,6 +734,22 @@ function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus
   }
 }
 
+function isSubAgentThreadSource(source: ThreadRegistryEntry["source"]): boolean {
+  return "subAgent" in source;
+}
+
+function threadSourceKinds(source: ThreadRegistryEntry["source"]): string[] {
+  if ("type" in source) {
+    return ["appServer"];
+  }
+
+  if ("thread_spawn" in source.subAgent) {
+    return ["subAgent", "subAgentThreadSpawn"];
+  }
+
+  return ["subAgent"];
+}
+
 function turnErrorFromUnknown(error: unknown) {
   return {
     message: error instanceof Error ? error.message : String(error),
@@ -1549,10 +1565,9 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
-    const collabAgent =
-      entry.source.type === "subAgent"
-        ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
-        : null;
+    const collabAgent = isSubAgentThreadSource(entry.source)
+      ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
+      : null;
     const needsCollabResume =
       collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
@@ -1584,7 +1599,7 @@ export class AppServerConnection {
       : this.createRuntime(
           parsed.threadId,
           entry.backendSessionId,
-          entry.source.type === "subAgent"
+          isSubAgentThreadSource(entry.source)
         );
 
     try {
@@ -1597,7 +1612,7 @@ export class AppServerConnection {
         await backend.setModel(sessionId, parsed.model);
       }
       runtime.sessionId = sessionId;
-      if (entry.source.type === "subAgent") {
+      if (isSubAgentThreadSource(entry.source)) {
         this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
       }
 
@@ -1739,7 +1754,7 @@ export class AppServerConnection {
       .filter((entry) =>
         !parsed.sourceKinds || parsed.sourceKinds.length === 0
           ? true
-          : parsed.sourceKinds.includes(entry.source.type)
+          : threadSourceKinds(entry.source).some((kind) => parsed.sourceKinds?.includes(kind))
       )
       .filter((entry) =>
         !parsed.modelProviders || parsed.modelProviders.length === 0
@@ -1890,7 +1905,7 @@ export class AppServerConnection {
     runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
       this.enqueueBackendEvent(parsed.threadId, turnId, event);
     });
-    if (entry.source.type === "subAgent") {
+    if (isSubAgentThreadSource(entry.source)) {
       this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
     }
 
@@ -1931,7 +1946,7 @@ export class AppServerConnection {
       await runtime.machine.interrupt();
     }
     await this.finishTurn(parsed.threadId, parsed.turnId);
-    if (entry.source.type === "subAgent") {
+    if (isSubAgentThreadSource(entry.source)) {
       this.collabManager?.syncExternalTurnInterrupt(parsed.threadId);
     }
     return {};
@@ -2204,7 +2219,7 @@ export class AppServerConnection {
       path: null,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
-      source: entry.source.type === "appServer" ? "appServer" : entry.source,
+      source: "type" in entry.source ? "appServer" : entry.source,
       agentNickname: entry.agentNickname,
       agentRole: entry.agentRole,
       gitInfo: entry.gitInfo,
@@ -2370,13 +2385,13 @@ export class AppServerConnection {
       modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       name: null,
       source: {
-        type: "subAgent",
         subAgent: {
-          type: "threadSpawn",
-          parentThreadId: input.parentThreadId,
-          depth: input.depth,
-          agentNickname: input.nickname,
-          agentRole: input.role,
+          thread_spawn: {
+            parent_thread_id: input.parentThreadId,
+            depth: input.depth,
+            agent_nickname: input.nickname,
+            agent_role: input.role,
+          },
         },
       },
       agentNickname: input.nickname,

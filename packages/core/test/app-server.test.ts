@@ -785,10 +785,10 @@ describe("AppServerConnection", () => {
         params: {
           thread: {
             source: {
-              type: "subAgent",
               subAgent: {
-                type: "threadSpawn",
-                parentThreadId: started.result.thread.id,
+                thread_spawn: {
+                  parent_thread_id: started.result.thread.id,
+                },
               },
             },
             agentRole: "worker",
@@ -810,7 +810,9 @@ describe("AppServerConnection", () => {
           }),
           expect.objectContaining({
             source: expect.objectContaining({
-              type: "subAgent",
+              subAgent: expect.objectContaining({
+                thread_spawn: expect.any(Object),
+              }),
             }),
           }),
         ])
@@ -943,9 +945,22 @@ describe("AppServerConnection", () => {
           threadId: childThreadId,
           includeTurns: false,
         },
-      })) as { result: { thread: { status: { type: string }; source: { type: string } } } };
+      })) as {
+        result: {
+          thread: {
+            status: { type: string };
+            source: { subAgent: { thread_spawn: { parent_thread_id: string } } };
+          };
+        };
+      };
       expect(childRead.result.thread.status).toEqual({ type: "active", activeFlags: ["turn"] });
-      expect(childRead.result.thread.source).toMatchObject({ type: "subAgent" });
+      expect(childRead.result.thread.source).toMatchObject({
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: started.result.thread.id,
+          },
+        },
+      });
 
       await expect(
         connection.handleMessage({
@@ -1292,11 +1307,19 @@ describe("AppServerConnection", () => {
         id: 4,
         method: "thread/list",
         params: { sourceKinds: ["subAgent"] },
-      })) as { result: { data: Array<{ id: string; source: { type: string } }> } };
+      })) as {
+        result: {
+          data: Array<{ id: string; source: { subAgent: { thread_spawn: object } } }>;
+        };
+      };
       expect(subAgents.result.data).toEqual([
         expect.objectContaining({
           id: childThreadId,
-          source: expect.objectContaining({ type: "subAgent" }),
+          source: expect.objectContaining({
+            subAgent: expect.objectContaining({
+              thread_spawn: expect.any(Object),
+            }),
+          }),
         }),
       ]);
 
@@ -1322,15 +1345,16 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             status: { type: string };
-            source: { type: string; subAgent: { parentThreadId: string } };
+            source: { subAgent: { thread_spawn: { parent_thread_id: string } } };
           };
         };
       };
       expect(childRead.result.thread.status).toEqual({ type: "idle" });
       expect(childRead.result.thread.source).toMatchObject({
-        type: "subAgent",
         subAgent: {
-          parentThreadId: started.result.thread.id,
+          thread_spawn: {
+            parent_thread_id: started.result.thread.id,
+          },
         },
       });
     } finally {

@@ -96,17 +96,16 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     source === "appServer" ||
     (isRecord(source) && source.type === "appServer") ||
     (isRecord(source) &&
-      source.type === "subAgent" &&
       isRecord(source.subAgent) &&
-      source.subAgent.type === "threadSpawn" &&
-      typeof source.subAgent.parentThreadId === "string" &&
-      typeof source.subAgent.depth === "number" &&
-      (typeof source.subAgent.agentNickname === "string" ||
-        source.subAgent.agentNickname === null ||
-        source.subAgent.agentNickname === undefined) &&
-      (typeof source.subAgent.agentRole === "string" ||
-        source.subAgent.agentRole === null ||
-        source.subAgent.agentRole === undefined));
+      isRecord(source.subAgent.thread_spawn) &&
+      typeof source.subAgent.thread_spawn.parent_thread_id === "string" &&
+      typeof source.subAgent.thread_spawn.depth === "number" &&
+      (typeof source.subAgent.thread_spawn.agent_nickname === "string" ||
+        source.subAgent.thread_spawn.agent_nickname === null ||
+        source.subAgent.thread_spawn.agent_nickname === undefined) &&
+      (typeof source.subAgent.thread_spawn.agent_role === "string" ||
+        source.subAgent.thread_spawn.agent_role === null ||
+        source.subAgent.thread_spawn.agent_role === undefined));
 
   return (
     typeof value.threadId === "string" &&

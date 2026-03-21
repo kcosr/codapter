@@ -419,13 +419,13 @@ export type TurnInterruptResponse = Record<string, never>;
 export type SessionSource =
   | "appServer"
   | {
-      type: "subAgent";
       subAgent: {
-        type: "threadSpawn";
-        parentThreadId: string;
-        depth: number;
-        agentNickname: string | null;
-        agentRole: string | null;
+        thread_spawn: {
+          parent_thread_id: string;
+          depth: number;
+          agent_nickname: string | null;
+          agent_role: string | null;
+        };
       };
     };
 
