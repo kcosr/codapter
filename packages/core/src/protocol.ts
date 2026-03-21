@@ -1,3 +1,4 @@
+import type { CollabAgentToolCallItem } from "./collab-types.js";
 import type { JsonRpcId } from "./jsonrpc.js";
 
 export type ClientInfo = {
@@ -370,7 +371,8 @@ export type ThreadItem =
       exitCode: number | null;
       durationMs: number | null;
     }
-  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string };
+  | { type: "fileChange"; id: string; changes: JsonValue[]; status: string }
+  | CollabAgentToolCallItem;
 
 export type TurnStatus = "completed" | "interrupted" | "failed" | "inProgress";
 
