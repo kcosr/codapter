@@ -950,6 +950,25 @@ describe("AppServerConnection", () => {
       await expect(
         connection.handleMessage({
           id: 5,
+          method: "thread/resume",
+          params: {
+            threadId: childThreadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            id: childThreadId,
+            status: { type: "active", activeFlags: ["turn"] },
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 6,
           method: "turn/start",
           params: {
             threadId: childThreadId,
@@ -957,15 +976,15 @@ describe("AppServerConnection", () => {
           },
         })
       ).resolves.toMatchObject({
-        id: 5,
+        id: 6,
         error: {
-          message: expect.stringContaining("send_input"),
+          message: expect.stringContaining("not ready"),
         },
       });
 
       await expect(
         callSocket(socketPath ?? "", {
-          id: 6,
+          id: 7,
           method: "collab/close",
           params: {
             parentThreadId: started.result.thread.id,
@@ -973,14 +992,14 @@ describe("AppServerConnection", () => {
           },
         })
       ).resolves.toEqual({
-        id: 6,
+        id: 7,
         result: {
           previous_status: "running",
         },
       });
 
       const childAfterClose = (await connection.handleMessage({
-        id: 7,
+        id: 8,
         method: "thread/read",
         params: {
           threadId: childThreadId,
@@ -991,7 +1010,7 @@ describe("AppServerConnection", () => {
 
       await expect(
         callSocket(socketPath ?? "", {
-          id: 8,
+          id: 9,
           method: "collab/resume",
           params: {
             parentThreadId: started.result.thread.id,
@@ -999,7 +1018,7 @@ describe("AppServerConnection", () => {
           },
         })
       ).resolves.toEqual({
-        id: 8,
+        id: 9,
         result: {
           status: "running",
         },
@@ -1007,7 +1026,7 @@ describe("AppServerConnection", () => {
 
       await expect(
         callSocket(socketPath ?? "", {
-          id: 9,
+          id: 10,
           method: "collab/sendInput",
           params: {
             parentThreadId: started.result.thread.id,
@@ -1016,7 +1035,7 @@ describe("AppServerConnection", () => {
           },
         })
       ).resolves.toMatchObject({
-        id: 9,
+        id: 10,
         result: {
           submission_id: expect.any(String),
         },
@@ -1024,7 +1043,7 @@ describe("AppServerConnection", () => {
 
       await expect(
         callSocket(socketPath ?? "", {
-          id: 10,
+          id: 11,
           method: "collab/wait",
           params: {
             parentThreadId: started.result.thread.id,
@@ -1033,7 +1052,7 @@ describe("AppServerConnection", () => {
           },
         })
       ).resolves.toEqual({
-        id: 10,
+        id: 11,
         result: {
           status: {
             [spawned.result.agent_id]: "completed",
@@ -1051,6 +1070,159 @@ describe("AppServerConnection", () => {
             notification.params.item.tool === "resumeAgent"
         )
       ).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("supports native thread resume and turn/start for a collab child thread", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-native-resume-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const prompts: string[] = [];
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      prompts.push(text);
+      if (text !== "after native resume") {
+        return;
+      }
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "done:after native resume",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+          text: "done:after native resume",
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "initial task",
+          agent_type: "worker",
+        },
+      })) as { result: { agent_id: string } };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childThreadStarted = (await connection.handleMessage({
+        id: 4,
+        method: "thread/list",
+        params: { sourceKinds: ["subAgent"] },
+      })) as { result: { data: Array<{ id: string }> } };
+      const childThreadId = childThreadStarted.result.data[0]?.id ?? "";
+      expect(childThreadId).toBeTruthy();
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 5,
+          method: "collab/close",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+          },
+        })
+      ).resolves.toEqual({
+        id: 5,
+        result: {
+          previous_status: "running",
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 6,
+          method: "thread/resume",
+          params: {
+            threadId: childThreadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 6,
+        result: {
+          thread: {
+            id: childThreadId,
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 7,
+          method: "turn/start",
+          params: {
+            threadId: childThreadId,
+            input: [{ type: "text", text: "after native resume", text_elements: [] }],
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 7,
+        result: {
+          turn: {
+            status: "inProgress",
+          },
+        },
+      });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 8,
+          method: "collab/wait",
+          params: {
+            parentThreadId: started.result.thread.id,
+            ids: [spawned.result.agent_id],
+            timeout_ms: 50,
+          },
+        })
+      ).resolves.toEqual({
+        id: 8,
+        result: {
+          status: {
+            [spawned.result.agent_id]: "completed",
+          },
+          timed_out: false,
+        },
+      });
+
+      expect(prompts).toEqual(["initial task", "after native resume"]);
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();

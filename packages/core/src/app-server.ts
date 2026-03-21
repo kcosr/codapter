@@ -1549,17 +1549,43 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
-    if (entry.source.type === "subAgent") {
-      throw new Error(
-        `Collab child thread ${parsed.threadId} must be resumed via resume_agent, not thread/resume`
+    const collabAgent =
+      entry.source.type === "subAgent"
+        ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
+        : null;
+    const needsCollabResume =
+      collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
+    const existing = this.threadRuntimes.get(parsed.threadId);
+    if (existing && !needsCollabResume) {
+      if (existing.status === "starting" && existing.readyPromise) {
+        await existing.readyPromise;
+      }
+      if (parsed.model) {
+        await backend.setModel(existing.sessionId, parsed.model);
+      }
+      const history = await backend.readSessionHistory(existing.sessionId);
+      const turns = buildTurns(history, entry.cwd ?? process.cwd());
+      if (existing.machine) {
+        turns.push(existing.machine.snapshot);
+      }
+      const thread = this.buildThread(entry, turns);
+      return await this.buildThreadExecutionResponse(
+        thread,
+        parsed.model ?? null,
+        parsed.cwd ?? null,
+        parsed.approvalPolicy ?? null,
+        parsed.approvalsReviewer ?? null,
+        parsed.sandbox ?? null
       );
     }
-    const existing = this.threadRuntimes.get(parsed.threadId);
-    if (existing) {
-      throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
-    }
 
-    const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
+    const runtime = existing
+      ? this.prepareRuntimeForResume(parsed.threadId, existing)
+      : this.createRuntime(
+          parsed.threadId,
+          entry.backendSessionId,
+          entry.source.type === "subAgent"
+        );
 
     try {
       await this.collabReady;
@@ -1571,6 +1597,9 @@ export class AppServerConnection {
         await backend.setModel(sessionId, parsed.model);
       }
       runtime.sessionId = sessionId;
+      if (entry.source.type === "subAgent") {
+        this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
+      }
 
       const history = await backend.readSessionHistory(sessionId);
       const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
@@ -1819,12 +1848,6 @@ export class AppServerConnection {
   private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnStartParams;
-    const existingRuntime = this.threadRuntimes.get(parsed.threadId);
-    if (existingRuntime?.managedByCollab) {
-      throw new Error(
-        `Collab child thread ${parsed.threadId} must receive input through send_input, not turn/start`
-      );
-    }
     const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
@@ -1867,6 +1890,9 @@ export class AppServerConnection {
     runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
       this.enqueueBackendEvent(parsed.threadId, turnId, event);
     });
+    if (entry.source.type === "subAgent") {
+      this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
+    }
 
     await this.publishThreadStatus(parsed.threadId);
     await machine.emitStarted();
@@ -1894,6 +1920,7 @@ export class AppServerConnection {
   private async handleTurnInterrupt(params: unknown): Promise<TurnInterruptResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnInterruptParams;
+    const entry = await this.getThreadEntry(parsed.threadId);
     const runtime = this.threadRuntimes.get(parsed.threadId);
     if (!runtime || runtime.status !== "turn_active" || runtime.activeTurnId !== parsed.turnId) {
       throw new Error(`No active turn ${parsed.turnId} for thread ${parsed.threadId}`);
@@ -1904,6 +1931,9 @@ export class AppServerConnection {
       await runtime.machine.interrupt();
     }
     await this.finishTurn(parsed.threadId, parsed.turnId);
+    if (entry.source.type === "subAgent") {
+      this.collabManager?.syncExternalTurnInterrupt(parsed.threadId);
+    }
     return {};
   }
 
@@ -2235,6 +2265,21 @@ export class AppServerConnection {
 
   private initRuntime(threadId: string, sessionId: string): ThreadRuntime {
     return this.createRuntime(threadId, sessionId, false);
+  }
+
+  private prepareRuntimeForResume(threadId: string, runtime: ThreadRuntime): ThreadRuntime {
+    const from = runtime.status;
+    runtime.status = "starting";
+    runtime.activeTurnId = null;
+    runtime.machine = null;
+    runtime.subscription?.dispose();
+    runtime.subscription = null;
+    runtime.statusOverride = null;
+    runtime.readyPromise = new Promise<void>((resolve) => {
+      runtime.readyResolver = resolve;
+    });
+    this.logTransition(threadId, from, "starting");
+    return runtime;
   }
 
   private createRuntime(

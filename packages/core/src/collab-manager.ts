@@ -458,6 +458,40 @@ export class CollabManager {
     return [...this.agents.values()].find((agent) => agent.threadId === threadId) ?? null;
   }
 
+  syncExternalResume(threadId: string, sessionId: string): void {
+    const agent = this.getAgentByThreadId(threadId);
+    if (!agent) {
+      return;
+    }
+    agent.sessionId = sessionId;
+    this.subscribeToAgent(agent);
+    this.transitionAgent(agent.agentId, "running", agent.completionMessage);
+  }
+
+  syncExternalTurnStart(threadId: string, turnId: string): void {
+    const agent = this.getAgentByThreadId(threadId);
+    const runtime = agent ? this.agentRuntimes.get(agent.agentId) : null;
+    if (!agent || !runtime) {
+      return;
+    }
+
+    runtime.activeTurnId = turnId;
+    runtime.lastAssistantText = "";
+    this.transitionAgent(agent.agentId, "running", null);
+  }
+
+  syncExternalTurnInterrupt(threadId: string): void {
+    const agent = this.getAgentByThreadId(threadId);
+    const runtime = agent ? this.agentRuntimes.get(agent.agentId) : null;
+    if (!agent || !runtime) {
+      return;
+    }
+
+    runtime.activeTurnId = null;
+    runtime.lastAssistantText = "";
+    this.transitionAgent(agent.agentId, "interrupted", null);
+  }
+
   private async beginAgentTurn(agent: CollabAgent, message: string): Promise<string> {
     const runtime = this.agentRuntimes.get(agent.agentId);
     if (!runtime) {
