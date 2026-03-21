@@ -154,8 +154,10 @@ Each tool's `execute()` callback:
 4. Returns result as `AgentToolResult`
 
 **Extension-level timeout.** Every UDS call has a hard timeout independent of
-the collab operation's own timeout. Default: 3660s (1hr + 60s buffer above
-`maxTimeoutMs`). If the UDS call times out, the extension returns an error
+the collab operation's own timeout. For `wait_agent`: 3660s (1hr + 60s buffer
+above `maxTimeoutMs`). For all other calls (spawn, send, close, resume): 30s
+— these are fast fire-and-forget operations that should complete in
+milliseconds. If the UDS call times out, the extension returns an error
 result to the Pi LLM so it can recover rather than blocking forever. The
 `AbortSignal` from Pi's tool execution is also wired to cancel the UDS call.
 
@@ -315,42 +317,78 @@ to the GUI as notifications on the child's `threadId`.
 
 ## Detailed Flows
 
+### Async Tool Model
+
+All 5 collab tools are **non-blocking** except `wait_agent`. This matches
+Codex's behavior:
+
+- `spawn_agent`: Creates child, submits prompt, returns immediately with
+  `{ agent_id, nickname }`. Child runs asynchronously.
+- `send_input`: Submits message to child's queue, returns immediately.
+- `wait_agent`: **Blocks** until any child reaches a final status or timeout.
+  This is the only call where the parent Pi's tool execution is suspended.
+- `close_agent`: Fires shutdown, returns previous status immediately.
+- `resume_agent`: Re-creates session, returns current status immediately.
+
+The parent LLM orchestrates async workflows by spawning multiple agents,
+doing its own work, then calling `wait_agent` when it needs results:
+
+```
+spawn_agent("task A") → { agent_id: "abc", nickname: "Robie" }  // instant
+spawn_agent("task B") → { agent_id: "def", nickname: "Zara" }   // instant
+// parent does its own work here while children run...
+wait_agent(["abc", "def"]) → blocks → { status: { "abc": "completed" }, timed_out: false }
+```
+
 ### spawn_agent
 
 ```
 Pi LLM ──tool_call──► Pi Extension ──collab/spawn──► Codapter CollabManager
-                       (blocks)                       │
-                                                      ├─ 1. Assign nickname, agentId
-                                                      ├─ 2. backend.createSession() → childSessionId
-                                                      ├─ 3. Create ThreadRuntime for child
-                                                      ├─ 4. Emit thread/started notification (GUI)
-                                                      ├─ 5. Emit item/started: CollabAgentToolCall{
-                                                      │      tool: "spawnAgent", status: "inProgress"
-                                                      │    } on parent thread (GUI)
-                                                      ├─ 6. backend.prompt(childSessionId, message)
-                                                      ├─ 7. Subscribe to child events → route to GUI
-                                                      ├─ 8. Set agent status = Running
-                                                      ├─ 9. Emit item/completed: CollabAgentToolCall{
-                                                      │      tool: "spawnAgent", status: "completed",
-                                                      │      agentsStates: { [agentId]: { status: "running" } }
-                                                      │    } on parent thread (GUI)
-                                                      ▼
-                       ◄──{ agent_id, nickname }────── 10. Return to extension
+                       (blocks briefly)                │
+                                                       ├─ 1. Validate depth/count limits
+                                                       ├─ 2. Assign nickname, agentId
+                                                       ├─ 3. backend.createSession() → childSessionId
+                                                       ├─ 4. Create ThreadRuntime for child
+                                                       ├─ 5. Subscribe to child events → route to GUI
+                                                       ├─ 6. Emit thread/started notification (GUI)
+                                                       ├─ 7. Emit item/started: CollabAgentToolCall{
+                                                       │      tool: "spawnAgent", status: "inProgress"
+                                                       │    } on parent thread
+                                                       ├─ 8. backend.prompt(childSessionId, message)
+                                                       │      (fire-and-forget — child runs async)
+                                                       ├─ 9. Set agent status = Running
+                                                       ├─ 10. Emit item/completed: CollabAgentToolCall{
+                                                       │       tool: "spawnAgent", status: "completed",
+                                                       │       agentsStates: { [agentId]: { status: "running" } }
+                                                       │     } on parent thread
+                                                       ▼
+                       ◄──{ agent_id, nickname }─────── 11. Return immediately
 Pi LLM ◄──tool_result──
+         (child continues running independently)
 ```
 
-### wait_agent
+Note: `spawn_agent` only blocks long enough to create the session and submit
+the prompt (~milliseconds). It does NOT wait for the child to finish. The
+child runs asynchronously; CollabManager monitors its events in the background.
+
+### wait_agent (only blocking call)
+
+This is the **only collab tool that blocks for a significant duration**. The
+parent Pi's tool execution is suspended until a child reaches a final state
+or the timeout expires.
 
 ```
 Pi LLM ──tool_call──► Pi Extension ──collab/wait──► Codapter CollabManager
-                       (blocks)                      │
+                       (BLOCKS)                      │
                                                      ├─ 1. Emit item/started: CollabAgentToolCall{
                                                      │      tool: "wait", status: "inProgress"
                                                      │    } on parent thread
                                                      ├─ 2. For each agentId in ids:
-                                                     │      if agent.status is final → collect
+                                                     │      if agent.status is final → collect immediately
                                                      │      else → add to agent.statusWaiters
-                                                     ├─ 3. Await: any waiter resolves OR timeout
+                                                     ├─ 3. If any already final → return immediately
+                                                     │    Else → await: any waiter resolves OR timeout
+                                                     │    (this is where the real blocking happens)
                                                      ├─ 4. Emit item/completed: CollabAgentToolCall{
                                                      │      tool: "wait", status: "completed",
                                                      │      agentsStates: { ... per-agent status }
@@ -364,16 +402,22 @@ Pi LLM ◄──tool_result──
 
 ```
 Pi LLM ──tool_call──► Pi Extension ──collab/sendInput──► CollabManager
-                       (blocks)                           │
-                                                          ├─ 1. Look up agent by ID
-                                                          ├─ 2. If interrupt: backend.abort(sessionId)
-                                                          ├─ 3. Emit item/started on parent thread
-                                                          ├─ 4. backend.prompt(sessionId, message)
-                                                          ├─ 5. Update agent status = Running
-                                                          ├─ 6. Emit item/completed on parent thread
-                                                          ▼
-                       ◄──{ submission_id }────────────── 7. Return
+                       (blocks briefly)                    │
+                                                           ├─ 1. Look up agent by ID, validate parent ownership
+                                                           ├─ 2. If interrupt: backend.abort(sessionId)
+                                                           ├─ 3. Emit item/started on parent thread
+                                                           ├─ 4. backend.prompt(sessionId, message)
+                                                           │      (fire-and-forget — agent processes async)
+                                                           ├─ 5. Update agent status = Running
+                                                           ├─ 6. Emit item/completed on parent thread
+                                                           ▼
+                       ◄──{ submission_id }─────────────── 7. Return immediately
+Pi LLM ◄──tool_result──
+         (child processes the message independently)
 ```
+
+Note: Like `spawn_agent`, `send_input` returns as soon as the message is
+submitted. It does NOT wait for the child to process the message.
 
 ### Child Agent Completion Detection
 

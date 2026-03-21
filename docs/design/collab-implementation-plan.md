@@ -190,14 +190,26 @@ export class CollabManager {
 ```
 
 Key implementation details:
+
+**Async model:** All tools except `wait_agent` return immediately after
+fire-and-forget operations. Child agents run asynchronously. Only `wait_agent`
+blocks the UDS response until a child reaches a final state.
+
 - `spawn`: Validate depth/count limits → assign nickname → create session →
-  create ThreadRuntime (via callback) → emit `item/started` → prompt →
-  subscribe to events → emit `item/completed` → return
-- `wait`: Check immediate final statuses → register waiters with
-  `Promise` + `setTimeout` → resolve on child `message_end`/`error` or timeout
-- `handleChildEvent`: Listen for `message_end` → capture last text →
-  set status `completed`. Listen for `error` → set status `errored`.
-  Resolve waiters.
+  create ThreadRuntime (via callback) → subscribe to events → emit
+  `item/started` → fire-and-forget `backend.prompt()` → set status Running →
+  emit `item/completed` → **return immediately** with `{ agent_id, nickname }`
+- `sendInput`: Look up agent → optionally abort → emit `item/started` →
+  fire-and-forget `backend.prompt()` → set status Running → emit
+  `item/completed` → **return immediately**
+- `wait`: Check immediate final statuses → if any already final, return
+  immediately → else register waiters with `Promise` + `setTimeout` → resolve
+  on child `message_end`/`error` or timeout → **this is the only blocking call**
+- `close`: Abort + dispose session → set status shutdown → return immediately
+- `resume`: Re-create session → set status running → return immediately
+- `handleChildEvent`: Background listener on each child's event stream.
+  Listen for `message_end` → capture last text → set status `completed`.
+  Listen for `error` → set status `errored`. Resolve any pending waiters.
 - `shutdownByParent`: Cascade close all children of a given parent thread
 - `dispose`: Shutdown all agents
 
