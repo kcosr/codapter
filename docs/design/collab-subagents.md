@@ -178,6 +178,82 @@ failed tool call and can decide to proceed without sub-agents.
 
 **Environment variable:** `CODAPTER_COLLAB_UDS=/path/to/codapter.sock`
 
+### LLM Tool Descriptions (from Codex source)
+
+The tool descriptions registered by the Pi extension must include the same
+behavioral guidance that Codex bakes into its tool specs. These descriptions
+are critical for preventing the LLM from misusing sub-agents.
+
+**`spawn_agent` description** (must include all of this guidance):
+
+```
+Only use spawn_agent if and only if the user explicitly asks for sub-agents,
+delegation, or parallel agent work. Requests for depth, thoroughness,
+research, investigation, or detailed codebase analysis do not count as
+permission to spawn.
+
+Spawn a sub-agent for a well-scoped task. Returns the agent id and
+user-facing nickname to use to communicate with this agent.
+
+{available_models_description}
+
+### When to delegate vs. do the subtask yourself
+- First, quickly analyze the overall user task and form a succinct high-level
+  plan. Identify which tasks are immediate blockers on the critical path, and
+  which tasks are sidecar tasks that can run in parallel without blocking the
+  next local step.
+- Use the smaller subagent when a subtask is easy enough for it to handle and
+  can run in parallel with your local work. Prefer delegating concrete, bounded
+  sidecar tasks that materially advance the main task.
+- Do not delegate urgent blocking work when your immediate next step depends on
+  that result.
+- Keep work local when the subtask is tightly coupled, urgent, or likely to
+  block your immediate next step.
+
+### Designing delegated subtasks
+- Subtasks must be concrete, well-defined, and self-contained.
+- Do not duplicate work between the main rollout and delegated subtasks.
+- Narrow the delegated ask to the concrete output you need next.
+- For coding tasks, prefer delegating concrete code-change worker subtasks.
+- For code-edit subtasks, decompose work so each delegated task has a disjoint
+  write set.
+
+### After you delegate
+- Call wait_agent very sparingly. Only call wait_agent when you need the result
+  immediately for the next critical-path step.
+- Do not redo delegated subagent tasks yourself; focus on integrating results or
+  tackling non-overlapping work.
+- While the subagent is running, do meaningful non-overlapping work immediately.
+- Do not repeatedly wait by reflex.
+
+### Parallel delegation patterns
+- Run multiple independent subtasks in parallel when you have distinct questions.
+- Split implementation into disjoint codebase slices and spawn multiple agents.
+- The key is to find opportunities to spawn multiple independent subtasks in
+  parallel within the same round.
+```
+
+The `{available_models_description}` placeholder is dynamically generated from
+`backend.listModels()` at extension init time, listing each model's name and
+supported reasoning effort levels.
+
+**`send_input`:** "Send a message to an existing agent. Use interrupt=true to
+redirect work immediately. You should reuse the agent by send_input if you
+believe your assigned task is highly dependent on the context of a previous
+task."
+
+**`wait_agent`:** "Wait for agents to reach a final status. Completed statuses
+may include the agent's final message. Returns empty status when timed out.
+Pass multiple ids to wait for whichever finishes first. Prefer longer waits
+(minutes) to avoid busy polling."
+
+**`close_agent`:** "Close an agent when it is no longer needed and return its
+previous status before shutdown was requested. Don't keep agents open for too
+long if they are not needed anymore."
+
+**`resume_agent`:** "Resume a previously closed agent by id so it can receive
+send_input and wait_agent calls."
+
 ### 2. CollabManager (codapter core)
 
 New module in `packages/core/src/collab-manager.ts`.

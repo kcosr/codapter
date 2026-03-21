@@ -361,14 +361,25 @@ export default function collabExtension(pi: any /* ExtensionAPI */) {
     }
   }
 
+  // Build dynamic model description from backend at init time
+  // (fetched once, cached for tool description injection)
+  const modelsDesc = await fetchAvailableModelsDescription(client, parentThreadId);
+
+  // IMPORTANT: Tool descriptions must match Codex's behavioral guidance.
+  // See docs/design/collab-subagents.md "LLM Tool Descriptions" section
+  // for the full required text. The spawn_agent description is ~40 lines
+  // of delegation strategy guidance that prevents LLM misuse.
+
   pi.registerTool({
     name: "spawn_agent",
     label: "Spawn Agent",
-    description: "Spawn a sub-agent for a well-scoped task. Returns the agent id and nickname.",
+    description: SPAWN_AGENT_DESCRIPTION.replace("{available_models_description}", modelsDesc),
     promptSnippet: "spawn_agent: Spawn a sub-agent for parallel or delegated work",
     promptGuidelines: [
       "Only use spawn_agent if the user explicitly asks for sub-agents, delegation, or parallel agent work.",
+      "Requests for depth, thoroughness, research, or investigation do not count as permission to spawn.",
       "Prefer doing the work yourself unless the task is clearly parallelizable.",
+      "Call wait_agent sparingly — only when blocked on a result for the critical path.",
     ],
     parameters: SpawnAgentParams,
     execute: (toolCallId, params, signal) =>
