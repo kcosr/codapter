@@ -1,3 +1,5 @@
+import type { ToolItemKind } from "./tool-kind.js";
+
 export interface BackendImageInput {
   readonly type: "image" | "localImage";
   readonly mimeType?: string;
@@ -11,6 +13,8 @@ export interface BackendMessage {
   readonly role: string;
   readonly content: unknown;
   readonly createdAt: string;
+  readonly stopReason?: string;
+  readonly errorMessage?: string | null;
 }
 
 export interface BackendSessionSummary {
@@ -75,14 +79,17 @@ export interface BackendToolStartEvent extends BackendBaseEvent {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly input: unknown;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendToolUpdateEvent extends BackendBaseEvent {
   readonly type: "tool_update";
   readonly toolCallId: string;
   readonly toolName: string;
+  readonly input?: unknown;
   readonly output: unknown;
   readonly isCumulative: boolean;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendToolEndEvent extends BackendBaseEvent {
@@ -91,6 +98,7 @@ export interface BackendToolEndEvent extends BackendBaseEvent {
   readonly toolName: string;
   readonly output: unknown;
   readonly isError: boolean;
+  readonly toolKind?: ToolItemKind;
 }
 
 export interface BackendMessageEndEvent extends BackendBaseEvent {
@@ -100,6 +108,8 @@ export interface BackendMessageEndEvent extends BackendBaseEvent {
 export interface BackendErrorEvent extends BackendBaseEvent {
   readonly type: "error";
   readonly message: string;
+  /** Set when the backend session/process is no longer usable for the current loaded thread. */
+  readonly fatal?: boolean;
 }
 
 export interface BackendElicitationRequestEvent extends BackendBaseEvent {

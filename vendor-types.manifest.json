@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "policy": {
+    "generatedOutput": "gitignored",
+    "ciVendorTypes": "required-before-build-and-test",
+    "ciNetworkAccess": "required",
+    "outputFormat": "dts",
+    "updatePolicy": "manifest-only",
+    "attribution": "preserve-upstream-headers"
+  },
+  "targets": {
+    "codex": {
+      "repo": "https://github.com/openai/codex.git",
+      "commit": "6b8175c7346d25a13479bc044819ca406ea1c3ae",
+      "outputRoot": "types/codex",
+      "license": "Apache-2.0",
+      "entrypoints": [
+        {
+          "source": "codex-rs/app-server-protocol/schema/typescript/v2/Thread.ts",
+          "mode": "copy"
+        }
+      ],
+      "entrypointPolicy": "Entrypoints are seeds; copy mode resolves transitive local relative imports as needed."
+    },
+    "pi": {
+      "repo": "https://github.com/badlogic/pi-mono.git",
+      "commit": "970774ec3ce2756f45b892ec1208bc73ba6f612d",
+      "outputRoot": "types/pi",
+      "license": "MIT",
+      "entrypoints": [
+        {
+          "source": "packages/ai/src/types.ts",
+          "mode": "extract",
+          "exports": ["ImageContent", "AssistantMessageEvent"]
+        },
+        {
+          "source": "packages/coding-agent/src/modes/rpc/rpc-types.ts",
+          "mode": "extract",
+          "exports": ["RpcExtensionUIRequest", "RpcExtensionUIResponse"]
+        },
+        {
+          "source": "packages/coding-agent/src/core/extensions/types.ts",
+          "mode": "extract",
+          "exports": [
+            "ToolExecutionStartEvent",
+            "ToolExecutionUpdateEvent",
+            "ToolExecutionEndEvent"
+          ]
+        }
+      ],
+      "entrypointPolicy": "Entrypoints are seeds; extract mode vendors selected exported declarations plus same-file exported type dependencies and fails loudly on imported type references."
+    }
+  }
+}

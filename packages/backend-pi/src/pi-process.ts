@@ -9,6 +9,22 @@ import type {
   BackendModelSummary,
   BackendTokenUsage,
 } from "@codapter/core";
+import { classifyToolName } from "@codapter/core";
+import type {
+  AssistantMessage as PiAssistantMessage,
+  AssistantMessageEvent as PiAssistantMessageEvent,
+  ImageContent as PiImageContent,
+  Usage as PiUsage,
+} from "../../../types/pi/packages/ai/src/types.js";
+import type {
+  ToolExecutionEndEvent as VendoredToolExecutionEndEvent,
+  ToolExecutionStartEvent as VendoredToolExecutionStartEvent,
+  ToolExecutionUpdateEvent as VendoredToolExecutionUpdateEvent,
+} from "../../../types/pi/packages/coding-agent/src/core/extensions/types.js";
+import type {
+  RpcExtensionUIRequest,
+  RpcExtensionUIResponse,
+} from "../../../types/pi/packages/coding-agent/src/modes/rpc/rpc-types.js";
 import { attachJsonlLineReader, parseJsonLine, serializeJsonLine } from "./jsonl.js";
 import type { PiBackendSessionRecord } from "./state-store.js";
 
@@ -27,11 +43,12 @@ export interface PiProcessResponse<T = unknown> {
   readonly error?: string;
 }
 
-interface PiImageContent {
-  readonly type: "image";
-  readonly data: string;
-  readonly mimeType: string;
-}
+type ToolExecutionStartEvent = VendoredToolExecutionStartEvent;
+type ToolExecutionUpdateEvent = VendoredToolExecutionUpdateEvent;
+type ToolExecutionEndEvent = VendoredToolExecutionEndEvent;
+type AssistantMessage = PiAssistantMessage;
+type AssistantMessageEvent = PiAssistantMessageEvent;
+type Usage = PiUsage;
 
 export interface PiSessionStateSnapshot {
   readonly sessionId: string;
@@ -121,12 +138,239 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isStopReason(value: unknown): value is AssistantMessage["stopReason"] {
+  return (
+    value === "stop" ||
+    value === "length" ||
+    value === "toolUse" ||
+    value === "error" ||
+    value === "aborted"
+  );
+}
+
+function isAssistantContentItem(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  switch (value.type) {
+    case "text":
+      return typeof value.text === "string";
+    case "thinking":
+      return typeof value.thinking === "string";
+    case "toolCall":
+      return (
+        typeof value.id === "string" && typeof value.name === "string" && isRecord(value.arguments)
+      );
+    default:
+      return false;
+  }
+}
+
+function isToolCallContentItem(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.type === "toolCall" &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    isRecord(value.arguments)
+  );
+}
+
+export function isUsage(value: unknown): value is Usage {
+  if (!isRecord(value) || !isRecord(value.cost)) {
+    return false;
+  }
+
+  return (
+    isFiniteNumber(value.input) &&
+    isFiniteNumber(value.output) &&
+    isFiniteNumber(value.cacheRead) &&
+    isFiniteNumber(value.cacheWrite) &&
+    isFiniteNumber(value.totalTokens) &&
+    isFiniteNumber(value.cost.input) &&
+    isFiniteNumber(value.cost.output) &&
+    isFiniteNumber(value.cost.cacheRead) &&
+    isFiniteNumber(value.cost.cacheWrite) &&
+    isFiniteNumber(value.cost.total)
+  );
+}
+
+export function isAssistantMessage(value: unknown): value is AssistantMessage {
+  return (
+    isRecord(value) &&
+    value.role === "assistant" &&
+    Array.isArray(value.content) &&
+    value.content.every((entry) => isAssistantContentItem(entry)) &&
+    typeof value.api === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.model === "string" &&
+    isUsage(value.usage) &&
+    isStopReason(value.stopReason) &&
+    isFiniteNumber(value.timestamp) &&
+    (value.responseId === undefined || typeof value.responseId === "string") &&
+    (value.errorMessage === undefined || typeof value.errorMessage === "string")
+  );
+}
+
+export function isToolExecutionStartEvent(value: unknown): value is ToolExecutionStartEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_start" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string"
+  );
+}
+
+export function isToolExecutionUpdateEvent(value: unknown): value is ToolExecutionUpdateEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_update" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string" &&
+    "partialResult" in value
+  );
+}
+
+export function isToolExecutionEndEvent(value: unknown): value is ToolExecutionEndEvent {
+  return (
+    isRecord(value) &&
+    value.type === "tool_execution_end" &&
+    typeof value.toolCallId === "string" &&
+    typeof value.toolName === "string" &&
+    typeof value.isError === "boolean" &&
+    "result" in value
+  );
+}
+
+export function isAssistantMessageEvent(value: unknown): value is AssistantMessageEvent {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  switch (value.type) {
+    case "start":
+      return isAssistantMessage(value.partial);
+    case "text_start":
+    case "thinking_start":
+    case "toolcall_start":
+      return typeof value.contentIndex === "number" && isAssistantMessage(value.partial);
+    case "text_delta":
+    case "thinking_delta":
+    case "toolcall_delta":
+      return (
+        typeof value.contentIndex === "number" &&
+        typeof value.delta === "string" &&
+        isAssistantMessage(value.partial)
+      );
+    case "text_end":
+    case "thinking_end":
+      return (
+        typeof value.contentIndex === "number" &&
+        typeof value.content === "string" &&
+        isAssistantMessage(value.partial)
+      );
+    case "toolcall_end":
+      return (
+        typeof value.contentIndex === "number" &&
+        isToolCallContentItem(value.toolCall) &&
+        isAssistantMessage(value.partial)
+      );
+    case "done":
+      return (
+        (value.reason === "stop" || value.reason === "length" || value.reason === "toolUse") &&
+        isAssistantMessage(value.message) &&
+        value.message.stopReason === value.reason
+      );
+    case "error":
+      return (
+        (value.reason === "aborted" || value.reason === "error") &&
+        isAssistantMessage(value.error) &&
+        value.error.stopReason === value.reason
+      );
+    default:
+      return false;
+  }
+}
+
+export function isRpcExtensionUIRequest(value: unknown): value is RpcExtensionUIRequest {
+  if (!isRecord(value) || value.type !== "extension_ui_request" || typeof value.id !== "string") {
+    return false;
+  }
+
+  switch (value.method) {
+    case "select":
+      return (
+        typeof value.title === "string" &&
+        Array.isArray(value.options) &&
+        value.options.every((option) => typeof option === "string")
+      );
+    case "confirm":
+      return typeof value.title === "string" && typeof value.message === "string";
+    case "input":
+      return typeof value.title === "string";
+    case "editor":
+      return typeof value.title === "string";
+    case "notify":
+      return typeof value.message === "string";
+    case "setStatus":
+      return typeof value.statusKey === "string";
+    case "setWidget":
+      return typeof value.widgetKey === "string";
+    case "setTitle":
+      return typeof value.title === "string";
+    case "set_editor_text":
+      return typeof value.text === "string";
+    default:
+      return false;
+  }
+}
+
+export function isElicitationRequest(
+  request: RpcExtensionUIRequest
+): request is Extract<
+  RpcExtensionUIRequest,
+  { method: "select" | "confirm" | "input" | "editor" }
+> {
+  return (
+    request.method === "select" ||
+    request.method === "confirm" ||
+    request.method === "input" ||
+    request.method === "editor"
+  );
+}
+
 function normalizeModelKey(provider: string, id: string): string {
   return `${provider}/${id}`;
 }
 
-function mapTokenUsage(stats: unknown): BackendTokenUsage {
+export function mapTokenUsage(stats: unknown): BackendTokenUsage {
   const record = isRecord(stats) ? stats : {};
+  const usage =
+    (isUsage(record.tokens) ? record.tokens : null) ??
+    (isUsage(record.tokenUsage) ? record.tokenUsage : null) ??
+    (isUsage((record as { token_usage?: unknown }).token_usage)
+      ? (record as { token_usage?: Usage }).token_usage
+      : null) ??
+    (isUsage((record as { statistics?: unknown }).statistics)
+      ? (record as { statistics?: Usage }).statistics
+      : null);
+
+  if (usage) {
+    return {
+      input: usage.input,
+      output: usage.output,
+      cacheRead: usage.cacheRead,
+      cacheWrite: usage.cacheWrite,
+      total: usage.totalTokens,
+      modelContextWindow: null,
+    };
+  }
+
   const tokens = isRecord(record.tokens)
     ? record.tokens
     : isRecord(record.tokenUsage)
@@ -253,6 +497,17 @@ function mapUpstreamModel(model: unknown, index: number): BackendModelSummary | 
 }
 
 function mapMessage(message: unknown, index: number): BackendMessage {
+  if (isAssistantMessage(message)) {
+    return {
+      id: `message-${index}`,
+      role: message.role,
+      content: structuredClone(message.content),
+      createdAt: new Date(message.timestamp).toISOString(),
+      stopReason: message.stopReason,
+      ...(message.errorMessage ? { errorMessage: message.errorMessage } : {}),
+    };
+  }
+
   const record = isRecord(message) ? message : {};
   const timestamp =
     typeof record.timestamp === "number"
@@ -278,10 +533,15 @@ function mapMessage(message: unknown, index: number): BackendMessage {
           ? structuredClone(record.content)
           : structuredClone(record),
     createdAt: timestamp,
+    ...(typeof record.stopReason === "string" ? { stopReason: record.stopReason } : {}),
+    ...(typeof record.errorMessage === "string" ? { errorMessage: record.errorMessage } : {}),
   };
 }
 
 function messageRole(message: unknown): string | null {
+  if (isAssistantMessage(message)) {
+    return message.role;
+  }
   if (!isRecord(message) || typeof message.role !== "string") {
     return null;
   }
@@ -289,6 +549,9 @@ function messageRole(message: unknown): string | null {
 }
 
 function messageStopReason(message: unknown): string | null {
+  if (isAssistantMessage(message)) {
+    return message.stopReason;
+  }
   if (!isRecord(message) || typeof message.stopReason !== "string") {
     return null;
   }
@@ -583,10 +846,20 @@ export class PiProcessSession {
       const error = new Error(
         `Pi process exited${code !== null ? ` with code ${code}` : ""}${signal ? ` (${signal})` : ""}`
       );
+      if (this.currentTurnId) {
+        this.emit({
+          sessionId: this.opaqueSessionId,
+          turnId: this.currentTurnId,
+          type: "error",
+          message: error.message,
+          fatal: true,
+        });
+      }
       for (const pending of this.pending.values()) {
         pending.reject(error);
       }
       this.pending.clear();
+      this.currentTurnId = null;
       this.process = null;
       this.stopReadingStdout?.();
       this.stopReadingStdout = null;
@@ -681,49 +954,78 @@ export class PiProcessSession {
         });
         return;
       case "tool_execution_start":
+        if (!isToolExecutionStartEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_start",
+            raw: JSON.stringify(event),
+          });
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_start",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
           input: event.args,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "tool_execution_update":
+        if (!isToolExecutionUpdateEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_update",
+            raw: JSON.stringify(event),
+          });
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_update",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          input: event.args,
           output: event.partialResult,
           isCumulative: true,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "tool_execution_end":
+        if (!isToolExecutionEndEvent(event)) {
+          this.logWriter?.write({
+            at: new Date().toISOString(),
+            component: "pi-process",
+            kind: "parsed-event",
+            eventType: "tool_execution_end",
+            raw: JSON.stringify(event),
+          });
+          return;
+        }
         this.emit({
           sessionId: this.opaqueSessionId,
           turnId: this.currentTurnId ?? "unknown",
           type: "tool_end",
-          toolCallId: String(event.toolCallId ?? "unknown"),
-          toolName: String(event.toolName ?? "unknown"),
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
           output: event.result,
-          isError: Boolean(event.isError),
+          isError: event.isError,
+          toolKind: classifyToolName(event.toolName),
         });
         return;
       case "extension_ui_request":
-        if (
-          event.method === "select" ||
-          event.method === "confirm" ||
-          event.method === "input" ||
-          event.method === "editor"
-        ) {
+        if (isRpcExtensionUIRequest(event) && isElicitationRequest(event)) {
           this.emit({
             sessionId: this.opaqueSessionId,
             turnId: this.currentTurnId ?? "unknown",
             type: "elicitation_request",
-            requestId: String(event.id ?? randomUUID()),
+            requestId: event.id,
             payload: event,
           });
         }
@@ -746,10 +1048,10 @@ export class PiProcessSession {
   }
 
   private emitMessageUpdate(event: Record<string, unknown>): void {
-    const assistantEvent = isRecord(event.assistantMessageEvent)
+    const assistantEvent = isAssistantMessageEvent(event.assistantMessageEvent)
       ? event.assistantMessageEvent
       : undefined;
-    if (!assistantEvent || typeof assistantEvent.type !== "string") {
+    if (!assistantEvent) {
       this.logWriter?.write({
         at: new Date().toISOString(),
         component: "pi-process",
@@ -816,7 +1118,7 @@ export class PiProcessSession {
         sessionId: this.opaqueSessionId,
         turnId: this.currentTurnId ?? "unknown",
         type: "error",
-        message: String(assistantEvent.errorMessage ?? "Pi assistant error"),
+        message: String(assistantEvent.error.errorMessage ?? "Pi assistant error"),
       });
       return;
     }
@@ -1009,10 +1311,10 @@ function parseUpstreamModelFromResponse(value: unknown): UpstreamModel | undefin
   return undefined;
 }
 
-function normalizeElicitationResponse(
+export function normalizeElicitationResponse(
   requestId: string,
   responseValue: unknown
-): Record<string, unknown> {
+): RpcExtensionUIResponse {
   if (typeof responseValue === "string") {
     return { type: "extension_ui_response", id: requestId, value: responseValue };
   }

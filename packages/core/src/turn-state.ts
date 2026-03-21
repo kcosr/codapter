@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
+import { classifyCodexErrorInfo } from "./codex-error-info.js";
+import { inferCommandActions } from "./command-actions.js";
 import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
+import { type ToolItemKind, classifyToolName } from "./tool-kind.js";
 
 export interface TurnStateNotificationSink {
   notify(method: string, params: unknown): Promise<void>;
@@ -12,6 +15,9 @@ interface ToolState {
   previousOutput: string;
   startedAt: number;
 }
+
+type FileUpdateChange = Extract<ThreadItem, { type: "fileChange" }>["changes"][number];
+type PatchChangeKind = FileUpdateChange["kind"];
 
 function textFromUnknown(value: unknown): string {
   if (typeof value === "string") {
@@ -65,14 +71,62 @@ function toolOutputText(output: unknown): string {
   return textFromUnknown(output);
 }
 
-function toolItemKind(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toPatchChangeKind(value: unknown): PatchChangeKind | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
   }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
+
+  switch (value.type) {
+    case "add":
+      return { type: "add" };
+    case "delete":
+      return { type: "delete" };
+    case "update":
+      return {
+        type: "update",
+        move_path: typeof value.move_path === "string" ? value.move_path : null,
+      };
+    default:
+      return null;
   }
-  return "agentMessage";
+}
+
+function toFileUpdateChange(value: unknown): FileUpdateChange | null {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.diff !== "string") {
+    return null;
+  }
+
+  const kind = toPatchChangeKind(value.kind);
+  if (!kind) {
+    return null;
+  }
+
+  return {
+    path: value.path,
+    kind,
+    diff: value.diff,
+  };
+}
+
+function toFileUpdateChanges(value: unknown): FileUpdateChange[] {
+  const candidate =
+    isRecord(value) && Array.isArray(value.changes)
+      ? value.changes
+      : isRecord(value) && Array.isArray(value.content)
+        ? value.content
+        : value;
+  if (!Array.isArray(candidate)) {
+    return [];
+  }
+
+  return candidate.flatMap((entry) => {
+    const change = toFileUpdateChange(entry);
+    return change ? [change] : [];
+  });
 }
 
 export class TurnStateMachine {
@@ -121,14 +175,16 @@ export class TurnStateMachine {
         await this.handleThinkingDelta(event.delta);
         return null;
       case "tool_start":
-        await this.handleToolStart(event.toolCallId, event.toolName, event.input);
+        await this.handleToolStart(event.toolCallId, event.toolName, event.input, event.toolKind);
         return null;
       case "tool_update":
         await this.handleToolUpdate(
           event.toolCallId,
           event.toolName,
+          event.input,
           event.output,
-          event.isCumulative
+          event.isCumulative,
+          event.toolKind
         );
         return null;
       case "tool_end":
@@ -139,7 +195,7 @@ export class TurnStateMachine {
       case "error":
         return await this.complete("failed", {
           message: event.message,
-          codexErrorInfo: null,
+          codexErrorInfo: classifyCodexErrorInfo(event.message),
           additionalDetails: null,
         });
       case "elicitation_request":
@@ -189,20 +245,23 @@ export class TurnStateMachine {
   private async handleToolStart(
     toolCallId: string,
     toolName: string,
-    input: unknown
+    input: unknown,
+    toolKind?: ToolItemKind
   ): Promise<void> {
     const id = randomUUID();
-    const kind = toolItemKind(toolName);
+    const kind = toolKind ?? classifyToolName(toolName);
+    const command = inferCommand(input);
     const item: ThreadItem =
       kind === "commandExecution"
         ? {
             type: "commandExecution",
             id,
-            command: inferCommand(input),
+            command,
             cwd: this.cwd,
             processId: null,
+            source: "agent",
             status: "inProgress",
-            commandActions: [],
+            commandActions: inferCommandActions(command),
             aggregatedOutput: null,
             exitCode: null,
             durationMs: null,
@@ -219,6 +278,7 @@ export class TurnStateMachine {
               id,
               text: "",
               phase: null,
+              memoryCitation: null,
             };
 
     await this.storeItem(item);
@@ -233,13 +293,18 @@ export class TurnStateMachine {
   private async handleToolUpdate(
     toolCallId: string,
     toolName: string,
+    input: unknown,
     output: unknown,
-    isCumulative: boolean
+    isCumulative: boolean,
+    toolKind?: ToolItemKind
   ): Promise<void> {
-    const state = this.toolStates.get(toolCallId);
+    let state = this.toolStates.get(toolCallId);
     if (!state) {
-      await this.handleToolStart(toolCallId, toolName, {});
-      return this.handleToolUpdate(toolCallId, toolName, output, isCumulative);
+      await this.handleToolStart(toolCallId, toolName, input ?? {}, toolKind);
+      state = this.toolStates.get(toolCallId);
+      if (!state) {
+        throw new Error(`Tool state missing after synthetic start for ${toolCallId}`);
+      }
     }
 
     const next = toolOutputText(output);
@@ -261,6 +326,10 @@ export class TurnStateMachine {
     }
 
     if (state.item.type === "fileChange") {
+      const changes = toFileUpdateChanges(output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
       await this.sink.notify("item/fileChange/outputDelta", {
         threadId: this.threadId,
         turnId: this.turn.id,
@@ -304,6 +373,10 @@ export class TurnStateMachine {
     }
 
     if (state.item.type === "fileChange") {
+      const changes = toFileUpdateChanges(output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
       state.item.status = isError ? "failed" : "completed";
     }
 
@@ -317,6 +390,7 @@ export class TurnStateMachine {
       id: randomUUID(),
       text: "",
       phase: null,
+      memoryCitation: null,
     };
     this.agentMessageItemId = item.id;
     await this.storeItem(item);
@@ -377,11 +451,17 @@ export class TurnStateMachine {
     }
     for (const [toolCallId, state] of this.toolStates) {
       if (state.item.type === "commandExecution") {
-        state.item.status = status === "interrupted" ? "interrupted" : state.item.status;
+        if (status === "interrupted" && state.item.status === "inProgress") {
+          state.item.status = "failed";
+        }
         state.item.durationMs = Date.now() - state.startedAt;
       }
-      if (state.item.type === "fileChange" && status === "interrupted") {
-        state.item.status = "interrupted";
+      if (
+        state.item.type === "fileChange" &&
+        status === "interrupted" &&
+        state.item.status === "inProgress"
+      ) {
+        state.item.status = "failed";
       }
       await this.completeItem(state.item.id);
       this.toolStates.delete(toolCallId);

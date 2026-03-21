@@ -10,6 +10,8 @@ import type {
   Disposable,
   IBackend,
 } from "./backend.js";
+import { classifyCodexErrorInfo } from "./codex-error-info.js";
+import { inferCommandActions } from "./command-actions.js";
 import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
@@ -99,6 +101,7 @@ import {
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
+import { classifyToolName } from "./tool-kind.js";
 import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
@@ -152,7 +155,7 @@ interface ConnectionState {
 
 interface ThreadRuntime {
   sessionId: string;
-  status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
+  status: "starting" | "ready" | "turn_active" | "forking" | "terminating" | "system_error";
   activeTurnId: string | null;
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
@@ -170,6 +173,10 @@ interface PendingToolUserInputRequest {
   resolve(response: ToolRequestUserInputResponse): void;
   reject(error: unknown): void;
 }
+
+type TextElements = Extract<UserInput, { type: "text" }>["text_elements"];
+type FileUpdateChange = Extract<ThreadItem, { type: "fileChange" }>["changes"][number];
+type PatchChangeKind = FileUpdateChange["kind"];
 
 type StoredAuthState =
   | { mode: "apikey"; apiKey: string }
@@ -411,6 +418,98 @@ function toJsonValueArray(value: unknown): JsonValue[] {
   return [{ type: "text", text }];
 }
 
+function toTextElements(value: unknown): TextElements {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const byteRange = entry.byteRange;
+    if (
+      !isRecord(byteRange) ||
+      typeof byteRange.start !== "number" ||
+      typeof byteRange.end !== "number"
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        byteRange: {
+          start: byteRange.start,
+          end: byteRange.end,
+        },
+        placeholder: typeof entry.placeholder === "string" ? entry.placeholder : null,
+      },
+    ];
+  });
+}
+
+function toUserInput(value: unknown): UserInput | null {
+  if (typeof value === "string") {
+    return { type: "text", text: value, text_elements: [] };
+  }
+
+  if (!isRecord(value)) {
+    const text = textFromUnknown(value);
+    return text ? { type: "text", text, text_elements: [] } : null;
+  }
+
+  switch (value.type) {
+    case "text":
+      if (typeof value.text !== "string") {
+        return null;
+      }
+      return {
+        type: "text",
+        text: value.text,
+        text_elements: toTextElements(value.text_elements),
+      };
+    case "image":
+      if (typeof value.url === "string") {
+        return { type: "image", url: value.url };
+      }
+      if (typeof value.data === "string") {
+        const mimeType = typeof value.mimeType === "string" ? value.mimeType : "image/png";
+        return {
+          type: "image",
+          url: `data:${mimeType};base64,${value.data}`,
+        };
+      }
+      return null;
+    case "localImage":
+      return typeof value.path === "string" ? { type: "localImage", path: value.path } : null;
+    case "skill":
+      return typeof value.name === "string" && typeof value.path === "string"
+        ? { type: "skill", name: value.name, path: value.path }
+        : null;
+    case "mention":
+      return typeof value.name === "string" && typeof value.path === "string"
+        ? { type: "mention", name: value.name, path: value.path }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function toUserInputs(value: unknown): UserInput[] {
+  if (Array.isArray(value)) {
+    const content = value.flatMap((entry) => {
+      const input = toUserInput(entry);
+      return input ? [input] : [];
+    });
+    if (content.length > 0) {
+      return content;
+    }
+  }
+
+  const input = toUserInput(value);
+  return input ? [input] : [];
+}
+
 function commandFromToolArguments(input: unknown): string {
   if (typeof input === "string") {
     return input;
@@ -426,16 +525,6 @@ function commandFromToolArguments(input: unknown): string {
     return command.filter((value): value is string => typeof value === "string").join(" ");
   }
   return "";
-}
-
-function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
 }
 
 function thinkingSummaryFromSignature(signature: string): string | null {
@@ -489,14 +578,62 @@ function textContentFromBlocks(blocks: readonly JsonValue[]): string {
     .join("");
 }
 
-function finalizeHistoricalToolItem(item: ThreadItem): void {
+function toPatchChangeKind(value: unknown): PatchChangeKind | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+
+  switch (value.type) {
+    case "add":
+      return { type: "add" };
+    case "delete":
+      return { type: "delete" };
+    case "update": {
+      const movePath = typeof value.move_path === "string" ? value.move_path : null;
+      return { type: "update", move_path: movePath };
+    }
+    default:
+      return null;
+  }
+}
+
+function toFileUpdateChange(value: unknown): FileUpdateChange | null {
+  if (!isRecord(value) || typeof value.path !== "string" || typeof value.diff !== "string") {
+    return null;
+  }
+
+  const kind = toPatchChangeKind(value.kind);
+  if (!kind) {
+    return null;
+  }
+
+  return {
+    path: value.path,
+    kind,
+    diff: value.diff,
+  };
+}
+
+function fileUpdateChangesFromUnknown(value: unknown): FileUpdateChange[] {
+  const candidate = isRecord(value) && Array.isArray(value.changes) ? value.changes : value;
+  if (!Array.isArray(candidate)) {
+    return [];
+  }
+
+  return candidate.flatMap((entry) => {
+    const change = toFileUpdateChange(entry);
+    return change ? [change] : [];
+  });
+}
+
+function finalizeHistoricalToolItem(item: ThreadItem, turnStatus: Turn["status"]): void {
   if (item.type === "commandExecution" && item.status === "inProgress") {
-    item.status = "completed";
-    item.exitCode = item.exitCode ?? 0;
+    item.status = turnStatus === "failed" ? "failed" : "completed";
+    item.exitCode = item.exitCode ?? (turnStatus === "failed" ? 1 : 0);
     item.durationMs = item.durationMs ?? 0;
   }
   if (item.type === "fileChange" && item.status === "inProgress") {
-    item.status = "completed";
+    item.status = turnStatus === "failed" ? "failed" : "completed";
   }
 }
 
@@ -521,8 +658,9 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   };
 
   const finalizeTurn = () => {
+    const turnStatus = currentTurn?.status ?? "completed";
     for (const item of pendingTools.values()) {
-      finalizeHistoricalToolItem(item);
+      finalizeHistoricalToolItem(item, turnStatus);
     }
     currentTurn = null;
     pendingTools = new Map<string, ThreadItem>();
@@ -535,7 +673,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       turn.items.push({
         type: "userMessage",
         id: `${message.id}_item`,
-        content: toJsonValueArray(message.content),
+        content: toUserInputs(message.content),
       });
       continue;
     }
@@ -552,6 +690,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
               id: `${message.id}_item_${index}`,
               text,
               phase: null,
+              memoryCitation: null,
             });
           }
           continue;
@@ -576,17 +715,19 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
             typeof block.id === "string" && block.id.length > 0
               ? block.id
               : `${message.id}_tool_${index}`;
-          const toolKind = toolKindFromName(toolName);
+          const toolKind = classifyToolName(toolName);
+          const command = commandFromToolArguments(block.arguments);
           const item: ThreadItem =
             toolKind === "commandExecution"
               ? {
                   type: "commandExecution",
                   id: `${message.id}_tool_${index}`,
-                  command: commandFromToolArguments(block.arguments),
+                  command,
                   cwd,
                   processId: null,
+                  source: "agent",
                   status: "inProgress",
-                  commandActions: [],
+                  commandActions: inferCommandActions(command),
                   aggregatedOutput: null,
                   exitCode: null,
                   durationMs: null,
@@ -603,6 +744,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
                     id: `${message.id}_tool_${index}`,
                     text: "",
                     phase: null,
+                    memoryCitation: null,
                   };
           turn.items.push(item);
           pendingTools.set(toolCallId, item);
@@ -619,8 +761,14 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
             id: `${message.id}_item_${index}`,
             text,
             phase: null,
+            memoryCitation: null,
           });
         }
+      }
+      if (message.stopReason === "error") {
+        turn.status = "failed";
+        turn.error = turnErrorFromUnknown(message.errorMessage ?? "Pi assistant error");
+        finalizeTurn();
       }
       continue;
     }
@@ -641,7 +789,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
           existingItem.exitCode = isError ? 1 : 0;
           existingItem.durationMs = existingItem.durationMs ?? 0;
         } else if (existingItem.type === "fileChange") {
-          existingItem.changes = blocks;
+          existingItem.changes = fileUpdateChangesFromUnknown(record.content);
           existingItem.status = isError ? "failed" : "completed";
         } else if (existingItem.type === "agentMessage") {
           existingItem.text = outputText;
@@ -650,7 +798,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
         continue;
       }
 
-      const toolKind = toolKindFromName(toolName);
+      const toolKind = classifyToolName(toolName);
       if (toolKind === "commandExecution") {
         turn.items.push({
           type: "commandExecution",
@@ -658,6 +806,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
           command: "",
           cwd,
           processId: null,
+          source: "agent",
           status: isError ? "failed" : "completed",
           commandActions: [],
           aggregatedOutput: outputText || null,
@@ -671,7 +820,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
         turn.items.push({
           type: "fileChange",
           id: `${message.id}_toolResult`,
-          changes: blocks,
+          changes: fileUpdateChangesFromUnknown(record.content),
           status: isError ? "failed" : "completed",
         });
         continue;
@@ -683,6 +832,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
           id: `${message.id}_toolResult`,
           text: outputText,
           phase: null,
+          memoryCitation: null,
         });
       }
       continue;
@@ -695,6 +845,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
         id: `${message.id}_item`,
         text,
         phase: null,
+        memoryCitation: null,
       });
     }
   }
@@ -703,28 +854,33 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   return turns;
 }
 
-function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
+function runtimeToThreadStatus(
+  runtime: ThreadRuntime | undefined,
+  waitingOnUserInput: boolean
+): ThreadStatus {
   if (!runtime) {
     return { type: "notLoaded" };
   }
-  switch (runtime.status) {
-    case "turn_active":
-      return { type: "active", activeFlags: ["turn"] };
-    case "starting":
-      return { type: "active", activeFlags: ["starting"] };
-    case "forking":
-      return { type: "active", activeFlags: ["forking"] };
-    case "terminating":
-      return { type: "active", activeFlags: ["terminating"] };
-    default:
-      return { type: "idle" };
+
+  if (runtime.status === "system_error") {
+    return { type: "systemError" };
   }
+
+  if (runtime.status === "ready") {
+    return { type: "idle" };
+  }
+
+  return {
+    type: "active",
+    activeFlags: waitingOnUserInput ? ["waitingOnUserInput"] : [],
+  };
 }
 
 function turnErrorFromUnknown(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
   return {
-    message: error instanceof Error ? error.message : String(error),
-    codexErrorInfo: null,
+    message,
+    codexErrorInfo: classifyCodexErrorInfo(message),
     additionalDetails: null,
   };
 }
@@ -948,7 +1104,7 @@ export class AppServerConnection {
 
   async handleMessage(message: unknown): Promise<JsonRpcResponse | null> {
     if (isJsonRpcResponse(message)) {
-      return this.handleResponse(message);
+      return await this.handleResponse(message);
     }
 
     if (isJsonRpcNotification(message)) {
@@ -1060,7 +1216,7 @@ export class AppServerConnection {
     }
   }
 
-  private handleResponse(message: JsonRpcResponse): null {
+  private async handleResponse(message: JsonRpcResponse): Promise<null> {
     if (message.id === null) {
       return null;
     }
@@ -1071,6 +1227,7 @@ export class AppServerConnection {
     }
 
     this.pendingToolUserInputRequests.delete(message.id);
+    await this.publishThreadStatus(pending.threadId);
     if ("error" in message) {
       pending.reject(message.error);
       return null;
@@ -1474,8 +1631,12 @@ export class AppServerConnection {
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
     const existing = this.threadRuntimes.get(parsed.threadId);
-    if (existing) {
+    if (existing && existing.status !== "system_error") {
       throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
+    }
+    if (existing?.status === "system_error") {
+      existing.subscription?.dispose();
+      this.threadRuntimes.delete(parsed.threadId);
     }
 
     const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
@@ -1488,8 +1649,10 @@ export class AppServerConnection {
       runtime.sessionId = sessionId;
 
       const history = await backend.readSessionHistory(sessionId);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       this.transitionToReady(parsed.threadId, runtime);
+      // Build the returned thread after the runtime becomes ready so the payload
+      // reflects the post-resume protocol status instead of transient "active".
+      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1512,13 +1675,20 @@ export class AppServerConnection {
     const parsed = params as ThreadForkParams;
     const sourceEntry = await this.getThreadEntry(parsed.threadId);
     const sourceRuntime = this.threadRuntimes.get(parsed.threadId);
-    if (sourceRuntime && sourceRuntime.status !== "ready") {
+    if (
+      sourceRuntime &&
+      sourceRuntime.status !== "ready" &&
+      sourceRuntime.status !== "system_error"
+    ) {
       throw new Error(`Cannot fork thread ${parsed.threadId} (status: ${sourceRuntime.status})`);
     }
 
-    if (sourceRuntime) {
+    if (sourceRuntime?.status === "ready") {
       sourceRuntime.status = "forking";
       this.logTransition(parsed.threadId, "ready", "forking");
+    } else if (sourceRuntime?.status === "system_error") {
+      sourceRuntime.subscription?.dispose();
+      sourceRuntime.subscription = null;
     }
 
     let forkThreadId: string | null = null;
@@ -1539,9 +1709,10 @@ export class AppServerConnection {
 
       forkThreadId = entry.threadId;
       const forkRuntime = this.initRuntime(entry.threadId, sessionId);
-      this.transitionToReady(entry.threadId, forkRuntime);
-
       const history = await backend.readSessionHistory(sessionId);
+      this.transitionToReady(entry.threadId, forkRuntime);
+      // Build the returned thread after the runtime becomes ready so the payload
+      // reflects the post-fork protocol status instead of transient "active".
       const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       await this.publish("thread/started", { thread }, entry.threadId);
       await this.publishThreadStatus(entry.threadId);
@@ -1770,6 +1941,14 @@ export class AppServerConnection {
       });
       if (turn) {
         await this.finishTurn(parsed.threadId, turnId);
+        return {
+          turn,
+        };
+      }
+      if (runtime.activeTurnId !== turnId || machine.snapshot.status !== "inProgress") {
+        return {
+          turn: machine.snapshot,
+        };
       }
       throw error;
     }
@@ -1878,7 +2057,7 @@ export class AppServerConnection {
 
     const completedTurn = await machine.handleEvent(event);
     if (completedTurn) {
-      await this.finishTurn(threadId, turnId);
+      await this.finishTurn(threadId, turnId, event.type === "error" && event.fatal);
     }
   }
 
@@ -1926,6 +2105,7 @@ export class AppServerConnection {
         resolve,
         reject,
       });
+      void this.publishThreadStatus(threadId);
 
       void this.send({
         id: requestId,
@@ -1933,6 +2113,7 @@ export class AppServerConnection {
         params,
       }).catch((error) => {
         this.pendingToolUserInputRequests.delete(requestId);
+        void this.publishThreadStatus(threadId);
         reject(error);
       });
     }).catch(() => ({ answers: {} }));
@@ -1952,14 +2133,14 @@ export class AppServerConnection {
     );
   }
 
-  private async finishTurn(threadId: string, turnId: string): Promise<void> {
+  private async finishTurn(threadId: string, turnId: string, systemError = false): Promise<void> {
     const runtime = this.threadRuntimes.get(threadId);
     if (!runtime || runtime.activeTurnId !== turnId) {
       return;
     }
     runtime.machine = null;
     runtime.activeTurnId = null;
-    runtime.status = "ready";
+    runtime.status = systemError ? "system_error" : "ready";
     await this.publishThreadStatus(threadId);
   }
 
@@ -2021,7 +2202,7 @@ export class AppServerConnection {
       modelProvider: entry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       createdAt: toUnixSeconds(entry.createdAt),
       updatedAt: toUnixSeconds(entry.updatedAt),
-      status: runtimeToThreadStatus(this.threadRuntimes.get(entry.threadId)),
+      status: this.getThreadStatus(entry.threadId),
       path: null,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
@@ -2064,10 +2245,26 @@ export class AppServerConnection {
       "thread/status/changed",
       {
         threadId,
-        status: runtimeToThreadStatus(this.threadRuntimes.get(threadId)),
+        status: this.getThreadStatus(threadId),
       },
       threadId
     );
+  }
+
+  private getThreadStatus(threadId: string): ThreadStatus {
+    return runtimeToThreadStatus(
+      this.threadRuntimes.get(threadId),
+      this.hasPendingToolUserInputRequest(threadId)
+    );
+  }
+
+  private hasPendingToolUserInputRequest(threadId: string): boolean {
+    for (const request of this.pendingToolUserInputRequests.values()) {
+      if (request.threadId === threadId) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async getReadyThreadRuntime(threadId: string): Promise<ThreadRuntime> {

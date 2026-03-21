@@ -32,3 +32,5 @@ codex-prod-extracted/
 
 # Adapter runtime
 codapter.toml
+types/codex/
+types/pi/

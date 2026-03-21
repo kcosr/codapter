@@ -58,8 +58,11 @@ graph TB
 git clone <repo-url> codapter
 cd codapter
 npm install
+npm run vendor-types
 npm run build:dist
 ```
+
+`npm run vendor-types` generates vendored upstream declaration files under `types/codex/` and `types/pi/`. Those outputs are gitignored on purpose, so fresh clones and CI jobs need to run the vendoring step before `npm run build`, `npm run build:dist`, or any tests that type-check vendored imports. The first pass assumes CI can fetch pinned upstream commits; if your CI cannot use the network, revisit the gitignore policy before adopting this setup there.
 
 ### 2. Run Locally
 
@@ -91,6 +94,7 @@ node dist/codapter.mjs app-server \
 ### Build Distribution Binary
 
 ```bash
+npm run vendor-types
 npm run build:dist
 # Builds all packages and creates dist/codapter.mjs
 ```

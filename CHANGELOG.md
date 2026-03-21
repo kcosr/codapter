@@ -34,6 +34,20 @@
 
 ### Added
 
+- Added manifest-driven vendored type generation via `npm run vendor-types` with pinned Codex and Pi upstream commits.
+- Added build preflight checks so missing vendored output fails with a clear bootstrap error.
+- Adopted vendored Codex `GitInfo` in `packages/core` with compile-time compatibility checks.
+- Adopted targeted vendored Pi `ImageContent`, `AssistantMessageEvent`, `RpcExtensionUIRequest`, and `RpcExtensionUIResponse` types only inside `packages/backend-pi`.
+- Added vendoring-script validation coverage, PI helper unit tests, and documented vendored-type bootstrap policy.
+- Replaced local core `SessionSource`, `ThreadStatus`, `UserInput`, `ThreadItem`, `TurnStatus`, `TurnError`, `Turn`, and `Thread` protocol types with vendored Codex declarations and aligned adapter output to the upstream-required shapes.
+- Centralized tool-kind classification across historical and live turn reconstruction and expanded direct `TurnStateMachine` lifecycle coverage.
+- Preserved PI assistant `stopReason` and `errorMessage` in normalized history, reconstructed failed historical turns in core, inferred vendored `commandActions`, and classified turn failures into vendored `CodexErrorInfo` variants.
+- Enriched normalized live tool events with `toolKind` and update-time `input`, allowing `TurnStateMachine` to recover missing tool starts from backend metadata instead of empty placeholders.
+- Propagated PI subprocess exits during active turns as backend error events and taught `turn/start` to return the finalized failed turn when startup both emits a turn error and rejects the prompt request.
+- Fatal backend turn failures now publish vendored `ThreadStatus.systemError`, both `thread/resume` and `thread/fork` can recover from persisted state after those crashes, and successful resume/fork responses no longer transiently report `active` while the runtime is already ready.
+- Extended vendoring extract mode to include same-file type dependencies, fail loudly on imported type references, and used it to vendor PI `AssistantMessageEvent`, replacing ad hoc assistant message update parsing in `packages/backend-pi`.
+- Added a checked-in GitHub Actions workflow that runs `npm run vendor-types` before build and tests so CI matches the gitignored vendored-output policy.
+- Tightened PI normalization to validate vendored `AssistantMessage` and `Usage` payloads directly, prefer vendored usage shapes in token stats, and normalize vendored assistant history/messages without falling back to ad hoc field probing when the upstream shape is present.
 - Initialized the codapter workspace, packages, transport layer, and build tooling.
 - Added a real Pi subprocess backend with opaque session tracking and JSONL RPC bridging.
 - Implemented thread lifecycle, turn streaming, native `command/exec`, and Pi-backed elicitation.
