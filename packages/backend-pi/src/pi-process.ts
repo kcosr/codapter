@@ -310,6 +310,44 @@ function isToolUseAssistantMessage(message: unknown): boolean {
   return messageRole(message) === "assistant" && messageStopReason(message) === "toolUse";
 }
 
+function textFromUnknown(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return JSON.stringify(value);
+}
+
+function assistantMessageText(message: unknown): string | null {
+  if (!isRecord(message)) {
+    return null;
+  }
+
+  const content = message.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+
+  const text = content
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return textFromUnknown(entry);
+      }
+      if (entry.type === "text" && typeof entry.text === "string") {
+        return entry.text;
+      }
+      return textFromUnknown(entry);
+    })
+    .join("");
+
+  return text.length > 0 ? text : null;
+}
+
 export function mapAvailableModelsToSummaries(models: unknown): BackendModelSummary[] {
   if (!Array.isArray(models)) {
     return [];
@@ -698,11 +736,15 @@ export class PiProcessSession {
         if (isToolUseAssistantMessage(event.message)) {
           return;
         }
-        this.emit({
-          sessionId: this.opaqueSessionId,
-          turnId: this.currentTurnId ?? "unknown",
-          type: "message_end",
-        });
+        {
+          const text = assistantMessageText(event.message);
+          this.emit({
+            sessionId: this.opaqueSessionId,
+            turnId: this.currentTurnId ?? "unknown",
+            type: "message_end",
+            ...(text !== null ? { text } : {}),
+          });
+        }
         return;
       case "tool_execution_start":
         this.emit({

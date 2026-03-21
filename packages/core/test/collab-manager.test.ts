@@ -291,6 +291,39 @@ describe("CollabManager", () => {
     });
   });
 
+  it("captures the child final message from message_end text without deltas", async () => {
+    const { backend, manager, parentThreadId, childThreadIds } = createManager({
+      config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },
+    });
+
+    const spawned = await spawnAgent(manager, parentThreadId);
+    const prompt = backend.prompts.at(-1);
+    expect(prompt).toBeDefined();
+
+    backend.emit(prompt?.sessionId ?? "", {
+      type: "message_end",
+      sessionId: prompt?.sessionId ?? "",
+      turnId: prompt?.turnId ?? "",
+      text: "child output",
+    });
+
+    await expect(
+      manager.wait({
+        parentThreadId,
+        ids: [spawned.agent_id],
+        timeout_ms: 5,
+      })
+    ).resolves.toEqual({
+      status: {
+        [spawned.agent_id]: "completed",
+      },
+      timed_out: false,
+    });
+
+    const child = manager.getAgentByThreadId(childThreadIds[0] ?? "");
+    expect(child?.completionMessage).toBe("child output");
+  });
+
   it("transitions to shutdown on close", async () => {
     const { backend, manager, parentThreadId, statusChanges } = createManager({});
     const spawned = await spawnAgent(manager, parentThreadId);

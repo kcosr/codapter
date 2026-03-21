@@ -390,6 +390,12 @@ describe("PiBackend", () => {
     expect(events.some((event) => event.type === "tool_update")).toBe(true);
     expect(events.some((event) => event.type === "tool_end")).toBe(true);
     expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "message_end",
+        text: "response-1",
+      })
+    );
     expect(
       events
         .filter(

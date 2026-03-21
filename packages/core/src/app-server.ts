@@ -2174,7 +2174,7 @@ export class AppServerConnection {
       path: null,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
-      source: entry.source,
+      source: entry.source.type === "appServer" ? "appServer" : entry.source,
       agentNickname: entry.agentNickname,
       agentRole: entry.agentRole,
       gitInfo: entry.gitInfo,

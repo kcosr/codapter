@@ -95,6 +95,7 @@ export interface BackendToolEndEvent extends BackendBaseEvent {
 
 export interface BackendMessageEndEvent extends BackendBaseEvent {
   readonly type: "message_end";
+  readonly text?: string;
 }
 
 export interface BackendErrorEvent extends BackendBaseEvent {

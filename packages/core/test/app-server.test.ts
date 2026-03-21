@@ -806,7 +806,7 @@ describe("AppServerConnection", () => {
         expect.arrayContaining([
           expect.objectContaining({
             id: started.result.thread.id,
-            source: expect.objectContaining({ type: "appServer" }),
+            source: "appServer",
           }),
           expect.objectContaining({
             source: expect.objectContaining({

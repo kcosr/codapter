@@ -417,7 +417,7 @@ export type TurnInterruptParams = {
 export type TurnInterruptResponse = Record<string, never>;
 
 export type SessionSource =
-  | { type: "appServer" }
+  | "appServer"
   | {
       type: "subAgent";
       subAgent: {

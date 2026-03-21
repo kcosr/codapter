@@ -509,6 +509,9 @@ export class CollabManager {
         break;
       case "message_end":
         runtime.activeTurnId = null;
+        if (typeof event.text === "string") {
+          runtime.lastAssistantText = event.text;
+        }
         this.transitionAgent(agentId, "completed", runtime.lastAssistantText || null);
         this.resolveWaiters(agentId);
         break;

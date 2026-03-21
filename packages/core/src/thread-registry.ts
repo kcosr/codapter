@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { GitInfo, SessionSource } from "./protocol.js";
 
+type StoredSessionSource = Exclude<SessionSource, "appServer"> | { type: "appServer" };
+
 export interface ThreadRegistryLogger {
   warn(message: string, context?: Record<string, unknown>): void;
 }
@@ -20,7 +22,7 @@ export interface ThreadRegistryEntry {
   readonly cwd: string | null;
   readonly preview: string | null;
   readonly modelProvider: string | null;
-  readonly source: SessionSource;
+  readonly source: StoredSessionSource;
   readonly agentNickname: string | null;
   readonly agentRole: string | null;
   readonly gitInfo: GitInfo | null;
@@ -36,7 +38,7 @@ export interface CreateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
-  readonly source?: SessionSource;
+  readonly source?: StoredSessionSource;
   readonly agentNickname?: string | null;
   readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
@@ -52,7 +54,7 @@ export interface UpdateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
-  readonly source?: SessionSource;
+  readonly source?: StoredSessionSource;
   readonly agentNickname?: string | null;
   readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
@@ -91,6 +93,7 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
   const validSource =
     source === undefined ||
     source === null ||
+    source === "appServer" ||
     (isRecord(source) && source.type === "appServer") ||
     (isRecord(source) &&
       source.type === "subAgent" &&
@@ -186,10 +189,14 @@ export class ThreadRegistry {
         });
         continue;
       }
+      const rawSource = (entry as { source?: unknown }).source;
       this.entries.set(entry.threadId, {
         ...entry,
         hidden: entry.hidden ?? false,
-        source: entry.source ?? { type: "appServer" },
+        source:
+          rawSource === "appServer" || rawSource === undefined || rawSource === null
+            ? { type: "appServer" }
+            : entry.source,
         agentNickname: entry.agentNickname ?? null,
         agentRole: entry.agentRole ?? null,
       });

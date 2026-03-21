@@ -143,6 +143,9 @@ export class TurnStateMachine {
         await this.handleToolEnd(event.toolCallId, event.toolName, event.output, event.isError);
         return null;
       case "message_end":
+        if (typeof event.text === "string" && event.text.length > 0 && !this.agentMessageItemId) {
+          await this.startAgentMessageItem(event.text);
+        }
         return await this.complete("completed", null);
       case "error":
         return await this.complete("failed", {
@@ -332,11 +335,11 @@ export class TurnStateMachine {
     this.toolStates.delete(toolCallId);
   }
 
-  private async startAgentMessageItem(): Promise<string> {
+  private async startAgentMessageItem(text = ""): Promise<string> {
     const item: ThreadItem = {
       type: "agentMessage",
       id: randomUUID(),
-      text: "",
+      text,
       phase: null,
     };
     this.agentMessageItemId = item.id;

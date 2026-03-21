@@ -107,4 +107,38 @@ describe("TurnStateMachine", () => {
       })
     );
   });
+
+  it("creates a final agent message item from message_end text when no deltas arrived", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      text: "final response",
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agentMessage",
+            text: "final response",
+          }),
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agentMessage",
+            text: "final response",
+          }),
+        }),
+      })
+    );
+  });
 });
