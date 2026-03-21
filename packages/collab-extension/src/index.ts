@@ -7,7 +7,7 @@ const WAIT_TIMEOUT_MS = 3_660_000;
 
 const SPAWN_AGENT_DESCRIPTION = `Only use spawn_agent if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work. Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.
 
-Spawn a sub-agent for a well-scoped task. Returns the agent id and user-facing nickname to use to communicate with this agent.
+Spawn a sub-agent for a well-scoped task. Returns metadata for exactly one spawned agent: the canonical agent_id and, when available, a user-facing nickname for that same agent. Do not treat agent_id and nickname as separate agents.
 
 {available_models_description}
 
