@@ -9,6 +9,7 @@ import {
   getSocketMode,
   getTcpListenerPort,
   parseListenTargets,
+  resolveCollabExtensionPath,
   runCli,
   startAppServerListeners,
 } from "../src/index.js";
@@ -130,6 +131,20 @@ describe("parseListenTargets", () => {
     } finally {
       await backend.dispose();
     }
+  });
+});
+
+describe("resolveCollabExtensionPath", () => {
+  it("uses CODAPTER_COLLAB_EXTENSION_PATH when provided", () => {
+    expect(
+      resolveCollabExtensionPath({
+        CODAPTER_COLLAB_EXTENSION_PATH: "/tmp/collab-extension/dist/index.js",
+      })
+    ).toBe("/tmp/collab-extension/dist/index.js");
+  });
+
+  it("falls back to the repo-built extension path", () => {
+    expect(resolveCollabExtensionPath({})).toContain("/packages/collab-extension/dist/index.js");
   });
 });
 

@@ -176,7 +176,7 @@ export async function runCli(
       ...(piCommand ? { command: piCommand } : {}),
       ...(piArgs ? { args: piArgs } : {}),
       ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
-      ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath() } : {}),
+      ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
     });
     await backend.initialize();
 
@@ -598,6 +598,10 @@ export function getSocketMode(mode: number): number {
   return mode & 0o777;
 }
 
-function resolveCollabExtensionPath(): string {
+export function resolveCollabExtensionPath(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.CODAPTER_COLLAB_EXTENSION_PATH?.trim();
+  if (override) {
+    return override;
+  }
   return new URL("../../collab-extension/dist/index.js", import.meta.url).pathname;
 }
