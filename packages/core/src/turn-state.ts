@@ -13,6 +13,14 @@ interface ToolState {
   startedAt: number;
 }
 
+const COLLAB_TOOL_NAMES = new Set([
+  "spawn_agent",
+  "send_input",
+  "wait_agent",
+  "close_agent",
+  "resume_agent",
+]);
+
 function textFromUnknown(value: unknown): string {
   if (typeof value === "string") {
     return value;
@@ -132,7 +140,7 @@ export class TurnStateMachine {
         );
         return null;
       case "tool_end":
-        await this.handleToolEnd(event.toolCallId, event.output, event.isError);
+        await this.handleToolEnd(event.toolCallId, event.toolName, event.output, event.isError);
         return null;
       case "message_end":
         return await this.complete("completed", null);
@@ -191,6 +199,10 @@ export class TurnStateMachine {
     toolName: string,
     input: unknown
   ): Promise<void> {
+    if (COLLAB_TOOL_NAMES.has(toolName)) {
+      return;
+    }
+
     const id = randomUUID();
     const kind = toolItemKind(toolName);
     const item: ThreadItem =
@@ -236,6 +248,10 @@ export class TurnStateMachine {
     output: unknown,
     isCumulative: boolean
   ): Promise<void> {
+    if (COLLAB_TOOL_NAMES.has(toolName)) {
+      return;
+    }
+
     const state = this.toolStates.get(toolCallId);
     if (!state) {
       await this.handleToolStart(toolCallId, toolName, {});
@@ -285,9 +301,14 @@ export class TurnStateMachine {
 
   private async handleToolEnd(
     toolCallId: string,
+    toolName: string,
     output: unknown,
     isError: boolean
   ): Promise<void> {
+    if (COLLAB_TOOL_NAMES.has(toolName)) {
+      return;
+    }
+
     const state = this.toolStates.get(toolCallId);
     if (!state) {
       return;

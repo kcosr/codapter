@@ -7,6 +7,7 @@ import type {
   BackendImageInput,
   BackendMessage,
   BackendModelSummary,
+  BackendSessionLaunchConfig,
   BackendTokenUsage,
 } from "@codapter/core";
 import { attachJsonlLineReader, parseJsonLine, serializeJsonLine } from "./jsonl.js";
@@ -19,6 +20,8 @@ export interface PiProcessLaunchOptions {
   readonly args?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
   readonly cwd?: string;
+  readonly collabExtensionPath?: string | null;
+  readonly launchConfig?: BackendSessionLaunchConfig;
 }
 
 export interface PiProcessResponse<T = unknown> {
@@ -113,8 +116,16 @@ function defaultCommand(): string {
   return "npx";
 }
 
-function defaultArgs(sessionDir: string): string[] {
-  return ["--yes", "@mariozechner/pi-coding-agent", "--mode", "rpc", "--session-dir", sessionDir];
+function defaultArgs(sessionDir: string, collabExtensionPath?: string | null): string[] {
+  return [
+    "--yes",
+    "@mariozechner/pi-coding-agent",
+    "--mode",
+    "rpc",
+    "--session-dir",
+    sessionDir,
+    ...(collabExtensionPath ? ["--extension", collabExtensionPath] : []),
+  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -360,9 +371,22 @@ export class PiProcessSession {
     this.opaqueSessionId = options.opaqueSessionId;
     this.command = options.command ?? defaultCommand();
     this.args = options.args
-      ? [...options.args, "--session-dir", options.sessionDir]
-      : defaultArgs(options.sessionDir);
-    this.env = options.env ?? process.env;
+      ? [
+          ...options.args,
+          "--session-dir",
+          options.sessionDir,
+          ...(options.collabExtensionPath ? ["--extension", options.collabExtensionPath] : []),
+        ]
+      : defaultArgs(options.sessionDir, options.collabExtensionPath);
+    this.env = {
+      ...(options.env ?? process.env),
+      ...(options.launchConfig?.collabSocketPath
+        ? { CODAPTER_COLLAB_UDS: options.launchConfig.collabSocketPath }
+        : {}),
+      ...(options.launchConfig?.threadId
+        ? { CODAPTER_COLLAB_PARENT_THREAD: options.launchConfig.threadId }
+        : {}),
+    };
     this.cwd = options.cwd ?? process.cwd();
     const logFilePath = this.env.CODAPTER_DEBUG_LOG_FILE;
     this.logWriter =

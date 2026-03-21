@@ -80,6 +80,7 @@ describe("parseListenTargets", () => {
       parseListenTargets(["--listen", "ws://127.0.0.1:8080", "--listen=unix:///tmp/codapter.sock"])
     ).toEqual({
       listenTargets: ["ws://127.0.0.1:8080", "unix:///tmp/codapter.sock"],
+      collabEnabled: false,
       analyticsDefaultEnabledSeen: false,
     });
   });
@@ -87,6 +88,7 @@ describe("parseListenTargets", () => {
   it("accepts stdio as a listen target", () => {
     expect(parseListenTargets(["--listen", "stdio"])).toEqual({
       listenTargets: ["stdio"],
+      collabEnabled: false,
       analyticsDefaultEnabledSeen: false,
     });
   });
@@ -94,6 +96,7 @@ describe("parseListenTargets", () => {
   it("accepts stdio alongside other listen targets", () => {
     expect(parseListenTargets(["--listen", "stdio", "--listen", "ws://127.0.0.1:8080"])).toEqual({
       listenTargets: ["stdio", "ws://127.0.0.1:8080"],
+      collabEnabled: false,
       analyticsDefaultEnabledSeen: false,
     });
   });
@@ -103,6 +106,15 @@ describe("parseListenTargets", () => {
       parseListenTargets([], { CODAPTER_LISTEN: "ws://127.0.0.1:8080, unix:///tmp/codapter.sock" })
     ).toEqual({
       listenTargets: ["ws://127.0.0.1:8080", "unix:///tmp/codapter.sock"],
+      collabEnabled: false,
+      analyticsDefaultEnabledSeen: false,
+    });
+  });
+
+  it("parses --collab alongside listen targets", () => {
+    expect(parseListenTargets(["--collab", "--listen", "stdio"])).toEqual({
+      listenTargets: ["stdio"],
+      collabEnabled: true,
       analyticsDefaultEnabledSeen: false,
     });
   });

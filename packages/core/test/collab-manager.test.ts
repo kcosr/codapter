@@ -74,16 +74,15 @@ class TestBackend implements IBackend {
 function createManager(options: {
   backend?: TestBackend;
   parentThreadId?: string;
-  childThreadIdPrefix?: string;
   config?: ConstructorParameters<typeof CollabManager>[0]["config"];
   notifySink?: CollabManagerNotificationSink;
 }) {
   const backend = options.backend ?? new TestBackend();
   const parentThreadId = options.parentThreadId ?? "parent-thread";
-  let childCounter = 0;
 
   const notifications: Array<{ method: string; params: unknown; threadId?: string }> = [];
   const statusChanges: string[] = [];
+  const childThreadIds: string[] = [];
 
   const manager = new CollabManager({
     backend,
@@ -100,9 +99,8 @@ function createManager(options: {
     resolveThreadSessionId(threadId) {
       return `session:${threadId}`;
     },
-    async createChildThread() {
-      childCounter += 1;
-      return { threadId: `${options.childThreadIdPrefix ?? "child-thread"}-${childCounter}` };
+    async createChildThread(input) {
+      childThreadIds.push(input.threadId);
     },
     onChildAgentStatusChanged({ agent }) {
       statusChanges.push(agent.status);
@@ -110,7 +108,7 @@ function createManager(options: {
     config: options.config,
   });
 
-  return { backend, manager, notifications, parentThreadId, statusChanges };
+  return { backend, manager, notifications, parentThreadId, statusChanges, childThreadIds };
 }
 
 async function spawnAgent(manager: CollabManager, parentThreadId: string, message = "do work") {
@@ -200,15 +198,17 @@ describe("CollabManager", () => {
   });
 
   it("rejects spawns when maxDepth is reached", async () => {
-    const { manager, parentThreadId } = createManager({
+    const { manager, parentThreadId, childThreadIds } = createManager({
       config: { maxDepth: 1 },
     });
-    const parentAgent = await spawnAgent(manager, parentThreadId);
+    await spawnAgent(manager, parentThreadId);
+    const childThreadId = childThreadIds[0];
+    expect(childThreadId).toEqual(expect.any(String));
 
     await expect(
       manager.spawn({
-        parentThreadId: "child-thread-1",
-        message: `delegate ${parentAgent.nickname}`,
+        parentThreadId: childThreadId ?? "",
+        message: "delegate again",
       })
     ).rejects.toThrow("Maximum collab depth reached");
   });
@@ -375,6 +375,50 @@ describe("CollabManager", () => {
         message: "follow-up",
       })
     ).rejects.toThrow("does not belong to parent thread");
+  });
+
+  it("rejects sendInput while an agent is already running unless interrupted", async () => {
+    const { manager, parentThreadId } = createManager({});
+    const spawned = await spawnAgent(manager, parentThreadId);
+
+    await expect(
+      manager.sendInput({
+        parentThreadId,
+        id: spawned.agent_id,
+        message: "follow-up",
+      })
+    ).rejects.toThrow("already running");
+  });
+
+  it("recursively shuts down descendant agents", async () => {
+    const { backend, manager, parentThreadId, childThreadIds } = createManager({});
+    const parentAgent = await spawnAgent(manager, parentThreadId, "parent");
+    const childThreadId = childThreadIds[0];
+    expect(childThreadId).toEqual(expect.any(String));
+
+    const childAgent = await manager.spawn({
+      parentThreadId: childThreadId ?? "",
+      message: "child",
+    });
+
+    await manager.close({
+      parentThreadId,
+      id: parentAgent.agent_id,
+    });
+
+    await expect(
+      manager.wait({
+        parentThreadId: childThreadId ?? "",
+        ids: [childAgent.agent_id],
+        timeout_ms: 5,
+      })
+    ).resolves.toEqual({
+      status: {
+        [childAgent.agent_id]: "shutdown",
+      },
+      timed_out: false,
+    });
+    expect(backend.disposedSessionIds).toHaveLength(2);
   });
 
   it("emits collab item notifications for tool calls", async () => {

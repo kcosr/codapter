@@ -32,6 +32,7 @@ export interface CliRunResult {
 
 export interface AppServerArgs {
   readonly listenTargets: readonly string[];
+  readonly collabEnabled: boolean;
   readonly analyticsDefaultEnabledSeen: boolean;
 }
 
@@ -50,6 +51,7 @@ export interface ListenerOptions {
   readonly backend: IBackend;
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
+  readonly collabEnabled?: boolean;
 }
 
 type ParsedListenTarget =
@@ -69,6 +71,7 @@ export function parseListenTargets(
   env: NodeJS.ProcessEnv = process.env
 ): AppServerArgs {
   const listenTargets: string[] = [];
+  let collabEnabled = false;
   let analyticsDefaultEnabledSeen = false;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -76,6 +79,11 @@ export function parseListenTargets(
 
     if (arg === ANALYTICS_FLAG) {
       analyticsDefaultEnabledSeen = true;
+      continue;
+    }
+
+    if (arg === "--collab") {
+      collabEnabled = true;
       continue;
     }
 
@@ -117,6 +125,7 @@ export function parseListenTargets(
 
   return {
     listenTargets,
+    collabEnabled,
     analyticsDefaultEnabledSeen,
   };
 }
@@ -167,6 +176,7 @@ export async function runCli(
       ...(piCommand ? { command: piCommand } : {}),
       ...(piArgs ? { args: piArgs } : {}),
       ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
+      ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath() } : {}),
     });
     await backend.initialize();
 
@@ -180,7 +190,7 @@ export async function runCli(
 
     try {
       if (parsed.listenTargets.length === 0) {
-        await runStdioAppServer(stdin, stdout, backend);
+        await runStdioAppServer(stdin, stdout, backend, parsed.collabEnabled);
         return { exitCode: 0 };
       }
 
@@ -188,6 +198,7 @@ export async function runCli(
         backend,
         stdin,
         stdout,
+        collabEnabled: parsed.collabEnabled,
       });
       stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
 
@@ -239,10 +250,12 @@ export async function startAppServerListeners(
 async function runStdioAppServer(
   stdin: NodeJS.ReadableStream,
   stdout: NodeJS.WritableStream,
-  backend: IBackend
+  backend: IBackend,
+  collabEnabled = false
 ): Promise<void> {
   const connection = new AppServerConnection({
     backend,
+    collabEnabled,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },
@@ -282,6 +295,7 @@ function startStdioListener(
 ): ListenerHandle {
   const connection = new AppServerConnection({
     backend: options.backend,
+    collabEnabled: options.collabEnabled,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },
@@ -422,6 +436,7 @@ function createRpcServer(options: ListenerOptions): {
   websocketServer.on("connection", (socket: WebSocket) => {
     const connection = new AppServerConnection({
       backend: options.backend,
+      collabEnabled: options.collabEnabled,
       onMessage(message) {
         socket.send(JSON.stringify(message));
       },
@@ -565,6 +580,7 @@ function writeHelp(stdout: NodeJS.WritableStream): void {
   stdout.write("Usage: codapter [--version|--help] | codapter app-server [--listen <url>]...\n");
   stdout.write("Options:\n");
   stdout.write("  --listen <url>                 Add a stdio, TCP WebSocket, or UDS listener\n");
+  stdout.write("  --collab                       Enable collab sub-agent support\n");
   stdout.write("  --analytics-default-enabled    Accepted and ignored\n");
 }
 
@@ -580,4 +596,8 @@ export function getTcpListenerPort(address: string): number {
 
 export function getSocketMode(mode: number): number {
   return mode & 0o777;
+}
+
+function resolveCollabExtensionPath(): string {
+  return new URL("../../collab-extension/dist/index.js", import.meta.url).pathname;
 }

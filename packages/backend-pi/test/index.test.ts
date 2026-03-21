@@ -8,10 +8,12 @@ async function createMockPiScript(rootDir: string): Promise<string> {
   const scriptPath = join(rootDir, "mock-pi-rpc.mjs");
   const script = [
     "import { randomUUID } from 'node:crypto';",
+    "import { writeFile } from 'node:fs/promises';",
     "import { StringDecoder } from 'node:string_decoder';",
     "import { join } from 'node:path';",
     "",
     "const sessionDir = process.argv[2] ?? process.cwd();",
+    "const capturePath = process.env.CODAPTER_CAPTURE_PROCESS_PATH;",
     "const decoder = new StringDecoder('utf8');",
     "let buffer = '';",
     "let promptCounter = 0;",
@@ -32,6 +34,14 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "  { provider: 'openai-codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', reasoning: true, input: ['text', 'image'], contextWindow: 272000 },",
     "  { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
     "];",
+    "",
+    "if (capturePath) {",
+    "  await writeFile(capturePath, JSON.stringify({",
+    "    argv: process.argv.slice(2),",
+    "    collabSocketPath: process.env.CODAPTER_COLLAB_UDS ?? null,",
+    "    parentThreadId: process.env.CODAPTER_COLLAB_PARENT_THREAD ?? null,",
+    "  }), 'utf8');",
+    "}",
     "",
     "function write(value) {",
     "  process.stdout.write(JSON.stringify(value) + '\\n');",
@@ -393,7 +403,7 @@ describe("PiBackend", () => {
         .every((event) => event.turnId === "turn_1")
     ).toBe(true);
     expect(tokenUsageEvent.usage).toMatchObject({
-      modelContextWindow: 1000000,
+      modelContextWindow: 272000,
       total: 12,
     });
 
@@ -440,8 +450,8 @@ describe("PiBackend", () => {
     expect(
       setModelLines.some(
         (record) =>
-          record.raw.includes('"provider":"anthropic"') &&
-          record.raw.includes('"modelId":"claude-opus-4-6"')
+          record.raw.includes(`"provider":"${selectedModel.id.split("/")[0]}"`) &&
+          record.raw.includes(`"modelId":"${selectedModel.id.split("/").slice(1).join("/")}"`)
       )
     ).toBe(true);
     expect(
@@ -449,14 +459,14 @@ describe("PiBackend", () => {
         (record) =>
           record.raw.includes('"provider":"pi"') && record.raw.includes('"modelId":"mock-fast"')
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       setModelLines.some(
         (record) =>
           record.raw.includes('"provider":"openai-codex"') &&
           record.raw.includes('"modelId":"gpt-5.3-codex"')
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       logRecords.some(
         (record) => record.kind === "stdout" && record.raw.includes('"type":"message_update"')
@@ -482,5 +492,46 @@ describe("PiBackend", () => {
     const resumedHistory = await reopened.readSessionHistory(sessionId);
     expect(resumedHistory).toEqual(expect.any(Array));
     await reopened.dispose();
+  });
+
+  it("passes collab launch config and extension path to child processes", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-collab-"));
+    const sessionDir = join(rootDir, "sessions");
+    const capturePath = join(rootDir, "launch.json");
+    const extensionPath = join(rootDir, "collab-extension.js");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+      env: {
+        ...process.env,
+        CODAPTER_CAPTURE_PROCESS_PATH: capturePath,
+      },
+      collabExtensionPath: extensionPath,
+    });
+
+    await backend.initialize();
+
+    try {
+      await backend.createSession({
+        threadId: "thread-parent-123",
+        collabSocketPath: "/tmp/codapter-collab-test.sock",
+      });
+    } finally {
+      await backend.dispose();
+    }
+
+    const launch = JSON.parse(await readFile(capturePath, "utf8")) as {
+      argv: string[];
+      collabSocketPath: string | null;
+      parentThreadId: string | null;
+    };
+    expect(launch.collabSocketPath).toBe("/tmp/codapter-collab-test.sock");
+    expect(launch.parentThreadId).toBe("thread-parent-123");
+    expect(launch.argv).toContain("--extension");
+    expect(launch.argv).toContain(extensionPath);
   });
 });

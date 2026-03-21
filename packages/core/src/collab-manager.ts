@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BackendEvent, Disposable, IBackend } from "./backend.js";
+import type { BackendEvent, BackendSessionLaunchConfig, Disposable, IBackend } from "./backend.js";
 import { AGENT_NICKNAMES } from "./collab-nicknames.js";
 import type {
   CollabAgent,
@@ -49,12 +49,9 @@ export interface CollabManagerCreateChildThreadInput {
   nickname: string;
   role: string | null;
   parentThreadId: string;
+  threadId: string;
   sessionId: string;
   depth: number;
-}
-
-export interface CollabManagerCreateChildThreadResult {
-  threadId: string;
 }
 
 export interface CollabManagerOptions {
@@ -62,9 +59,9 @@ export interface CollabManagerOptions {
   notifySink: CollabManagerNotificationSink;
   resolveParentTurnId(parentThreadId: string): string;
   resolveThreadSessionId(threadId: string): string;
-  createChildThread(
-    input: CollabManagerCreateChildThreadInput
-  ): Promise<CollabManagerCreateChildThreadResult>;
+  createSessionLaunchConfig?(threadId: string): BackendSessionLaunchConfig;
+  createChildThread(input: CollabManagerCreateChildThreadInput): Promise<void>;
+  startChildTurn?(input: { agent: CollabAgent; message: string }): string | Promise<string>;
   onChildAgentEvent?(input: {
     agent: CollabAgent;
     event: BackendEvent;
@@ -89,12 +86,15 @@ export class CollabManager {
   private readonly agentRuntimes = new Map<string, CollabAgentRuntime>();
   private readonly nicknames = new Set<string>();
   private readonly waiters = new Map<string, CollabWaiter>();
+  private readonly shuttingDownAgentIds = new Set<string>();
   private readonly config: CollabConfig;
   private readonly backend: IBackend;
   private readonly notifySink: CollabManagerNotificationSink;
   private readonly resolveParentTurnId: (parentThreadId: string) => string;
   private readonly resolveThreadSessionId: (threadId: string) => string;
+  private readonly createSessionLaunchConfig: (threadId: string) => BackendSessionLaunchConfig;
   private readonly createChildThread: CollabManagerOptions["createChildThread"];
+  private readonly startChildTurn: CollabManagerOptions["startChildTurn"];
   private readonly onChildAgentEvent: CollabManagerOptions["onChildAgentEvent"];
   private readonly onChildAgentStatusChanged: CollabManagerOptions["onChildAgentStatusChanged"];
   private nicknameCounter = 0;
@@ -104,7 +104,9 @@ export class CollabManager {
     this.notifySink = options.notifySink;
     this.resolveParentTurnId = options.resolveParentTurnId;
     this.resolveThreadSessionId = options.resolveThreadSessionId;
+    this.createSessionLaunchConfig = options.createSessionLaunchConfig ?? (() => ({}));
     this.createChildThread = options.createChildThread;
+    this.startChildTurn = options.startChildTurn;
     this.onChildAgentEvent = options.onChildAgentEvent;
     this.onChildAgentStatusChanged = options.onChildAgentStatusChanged;
     this.config = {
@@ -119,20 +121,26 @@ export class CollabManager {
     const nickname = this.assignNickname();
     const role = req.agentType ?? null;
     const depth = this.depthForParent(req.parentThreadId) + 1;
+    const threadId = randomUUID();
+    const sessionLaunchConfig = this.createSessionLaunchConfig(threadId);
     const sessionId = req.forkContext
-      ? await this.backend.forkSession(this.resolveThreadSessionId(req.parentThreadId))
-      : await this.backend.createSession();
+      ? await this.backend.forkSession(
+          this.resolveThreadSessionId(req.parentThreadId),
+          sessionLaunchConfig
+        )
+      : await this.backend.createSession(sessionLaunchConfig);
 
     try {
       if (req.model) {
         await this.backend.setModel(sessionId, req.model);
       }
 
-      const thread = await this.createChildThread({
+      await this.createChildThread({
         agentId,
         nickname,
         role,
         parentThreadId: req.parentThreadId,
+        threadId,
         sessionId,
         depth,
       });
@@ -141,7 +149,7 @@ export class CollabManager {
         agentId,
         nickname,
         role,
-        threadId: thread.threadId,
+        threadId,
         sessionId,
         parentThreadId: req.parentThreadId,
         depth,
@@ -160,7 +168,7 @@ export class CollabManager {
       });
 
       await this.emitToolItem("item/started", req.parentThreadId, item);
-      this.beginAgentTurn(agentId);
+      await this.beginAgentTurn(agent, req.message);
       this.transitionAgent(agentId, "running", null);
       void this.startPrompt(agentId, req.message);
 
@@ -182,11 +190,17 @@ export class CollabManager {
 
   async sendInput(req: CollabSendInputRequest): Promise<CollabSendInputResponse> {
     const agent = this.requireOwnedAgent(req.parentThreadId, req.id);
+    const runtime = this.agentRuntimes.get(agent.agentId);
     if (agent.status === "shutdown") {
       throw new Error(`Agent ${req.id} is shutdown and must be resumed before sending input`);
     }
     if (agent.status === "errored") {
       throw new Error(`Agent ${req.id} is errored and must be resumed before sending input`);
+    }
+    if (runtime?.activeTurnId && !req.interrupt) {
+      throw new Error(
+        `Agent ${req.id} is already running; wait for it to finish or use interrupt=true`
+      );
     }
 
     const item = this.createToolItem(req.parentThreadId, "sendInput", {
@@ -204,7 +218,7 @@ export class CollabManager {
     }
 
     const submissionId = randomUUID();
-    this.beginAgentTurn(agent.agentId);
+    await this.beginAgentTurn(agent, req.message);
     this.transitionAgent(agent.agentId, "running", null);
     void this.startPrompt(agent.agentId, req.message);
 
@@ -288,18 +302,7 @@ export class CollabManager {
 
     const previousStatus = agent.status;
     if (agent.status !== "shutdown") {
-      const runtime = this.agentRuntimes.get(agent.agentId);
-      runtime?.subscription?.dispose();
-      if (runtime) {
-        runtime.subscription = null;
-        runtime.activeTurnId = null;
-        runtime.lastAssistantText = "";
-      }
-
-      await this.backend.abort(agent.sessionId).catch(() => {});
-      await this.backend.disposeSession(agent.sessionId).catch(() => {});
-      this.transitionAgent(agent.agentId, "shutdown", agent.completionMessage);
-      this.resolveWaiters(agent.agentId);
+      await this.shutdownAgent(agent.agentId);
     }
 
     item.status = "completed";
@@ -333,9 +336,12 @@ export class CollabManager {
     runtime?.subscription?.dispose();
     let sessionId = agent.sessionId;
     try {
-      sessionId = await this.backend.resumeSession(agent.sessionId);
+      sessionId = await this.backend.resumeSession(
+        agent.sessionId,
+        this.createSessionLaunchConfig(agent.threadId)
+      );
     } catch {
-      sessionId = await this.backend.createSession();
+      sessionId = await this.backend.createSession(this.createSessionLaunchConfig(agent.threadId));
     }
 
     agent.sessionId = sessionId;
@@ -359,11 +365,7 @@ export class CollabManager {
   }
 
   async dispose(): Promise<void> {
-    await Promise.all(
-      [...this.agents.values()].map((agent) =>
-        this.close({ parentThreadId: agent.parentThreadId, id: agent.agentId }).then(() => {})
-      )
-    );
+    await Promise.all([...this.agents.values()].map((agent) => this.shutdownAgent(agent.agentId)));
 
     for (const waiter of this.waiters.values()) {
       waiter.resolve({
@@ -452,12 +454,18 @@ export class CollabManager {
     this.agentRuntimes.set(agent.agentId, runtime);
   }
 
-  private beginAgentTurn(agentId: string): string {
-    const runtime = this.agentRuntimes.get(agentId);
+  getAgentByThreadId(threadId: string): CollabAgent | null {
+    return [...this.agents.values()].find((agent) => agent.threadId === threadId) ?? null;
+  }
+
+  private async beginAgentTurn(agent: CollabAgent, message: string): Promise<string> {
+    const runtime = this.agentRuntimes.get(agent.agentId);
     if (!runtime) {
-      throw new Error(`Missing runtime for agent ${agentId}`);
+      throw new Error(`Missing runtime for agent ${agent.agentId}`);
     }
-    const turnId = randomUUID();
+    const turnId = this.startChildTurn
+      ? await this.startChildTurn({ agent: structuredClone(agent), message })
+      : randomUUID();
     runtime.activeTurnId = turnId;
     runtime.lastAssistantText = "";
     return turnId;
@@ -526,6 +534,32 @@ export class CollabManager {
     agent.status = status;
     agent.completionMessage = message;
     void this.onChildAgentStatusChanged?.({ agent: structuredClone(agent) });
+  }
+
+  private async shutdownAgent(agentId: string): Promise<void> {
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.status === "shutdown" || this.shuttingDownAgentIds.has(agentId)) {
+      return;
+    }
+    this.shuttingDownAgentIds.add(agentId);
+
+    try {
+      await this.shutdownByParent(agent.threadId);
+
+      const runtime = this.agentRuntimes.get(agent.agentId);
+      await this.backend.abort(agent.sessionId).catch(() => {});
+      runtime?.subscription?.dispose();
+      if (runtime) {
+        runtime.subscription = null;
+        runtime.activeTurnId = null;
+        runtime.lastAssistantText = "";
+      }
+      await this.backend.disposeSession(agent.sessionId).catch(() => {});
+      this.transitionAgent(agent.agentId, "shutdown", agent.completionMessage);
+      this.resolveWaiters(agent.agentId);
+    } finally {
+      this.shuttingDownAgentIds.delete(agentId);
+    }
   }
 
   private resolveWaiters(agentId: string): void {

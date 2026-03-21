@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -140,6 +141,29 @@ function createBackend(onPromptCallback?: ConstructorParameters<typeof TestBacke
 function createFakeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.sig`;
+}
+
+function callSocket(socketPath: string, payload: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      const line = lines.find((entry) => entry.trim().length > 0);
+      if (!line) {
+        return;
+      }
+      socket.end();
+      resolve(JSON.parse(line) as unknown);
+    });
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify(payload)}\n`);
+    });
+  });
 }
 
 describe("AppServerConnection", () => {
@@ -680,6 +704,579 @@ describe("AppServerConnection", () => {
       });
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("spawns collab child threads over the internal UDS and exposes them in thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: `done:${text}`,
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "review this",
+          agent_type: "worker",
+        },
+      })) as { result: { agent_id: string; nickname: string } };
+
+      expect(spawned.result.agent_id).toEqual(expect.any(String));
+      expect(spawned.result.nickname).toEqual(expect.any(String));
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      );
+      expect(childStarted).toMatchObject({
+        method: "thread/started",
+        params: {
+          thread: {
+            source: {
+              type: "subAgent",
+              subAgent: {
+                type: "threadSpawn",
+                parentThreadId: started.result.thread.id,
+              },
+            },
+            agentRole: "worker",
+          },
+        },
+      });
+
+      const listed = (await connection.handleMessage({
+        id: 4,
+        method: "thread/list",
+        params: {},
+      })) as { id: number; result: { data: Array<Record<string, unknown>> } };
+      expect(listed.id).toBe(4);
+      expect(listed.result.data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: started.result.thread.id,
+            source: expect.objectContaining({ type: "appServer" }),
+          }),
+          expect.objectContaining({
+            source: expect.objectContaining({
+              type: "subAgent",
+            }),
+          }),
+        ])
+      );
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 5,
+          method: "collab/wait",
+          params: {
+            parentThreadId: started.result.thread.id,
+            ids: [spawned.result.agent_id],
+            timeout_ms: 10,
+          },
+        })
+      ).resolves.toEqual({
+        id: 5,
+        result: {
+          status: {
+            [spawned.result.agent_id]: "completed",
+          },
+          timed_out: false,
+        },
+      });
+
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.item?.type === "collabAgentToolCall" &&
+            notification.params.item.tool === "spawnAgent"
+        )
+      ).toBeTruthy();
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.item?.type === "collabAgentToolCall" &&
+            notification.params.item.tool === "wait"
+        )
+      ).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("manages collab child close, resume, and send_input lifecycle over the internal UDS", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-lifecycle-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const prompts: Array<{ sessionId: string; turnId: string; text: string }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      prompts.push({ sessionId, turnId, text });
+      if (text !== "after resume") {
+        return;
+      }
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: `done:${text}`,
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "initial task",
+          agent_type: "worker",
+        },
+      })) as { result: { agent_id: string } };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      ) as { params: { thread: { id: string } } } | undefined;
+      expect(childStarted).toBeDefined();
+      const childThreadId = childStarted?.params.thread.id ?? "";
+
+      const childRead = (await connection.handleMessage({
+        id: 4,
+        method: "thread/read",
+        params: {
+          threadId: childThreadId,
+          includeTurns: false,
+        },
+      })) as { result: { thread: { status: { type: string }; source: { type: string } } } };
+      expect(childRead.result.thread.status).toEqual({ type: "active", activeFlags: ["turn"] });
+      expect(childRead.result.thread.source).toMatchObject({ type: "subAgent" });
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "turn/start",
+          params: {
+            threadId: childThreadId,
+            input: [{ type: "text", text: "illegal", text_elements: [] }],
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        error: {
+          message: expect.stringContaining("send_input"),
+        },
+      });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 6,
+          method: "collab/close",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+          },
+        })
+      ).resolves.toEqual({
+        id: 6,
+        result: {
+          previous_status: "running",
+        },
+      });
+
+      const childAfterClose = (await connection.handleMessage({
+        id: 7,
+        method: "thread/read",
+        params: {
+          threadId: childThreadId,
+          includeTurns: false,
+        },
+      })) as { result: { thread: { status: { type: string } } } };
+      expect(childAfterClose.result.thread.status).toEqual({ type: "idle" });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 8,
+          method: "collab/resume",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+          },
+        })
+      ).resolves.toEqual({
+        id: 8,
+        result: {
+          status: "running",
+        },
+      });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 9,
+          method: "collab/sendInput",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+            message: "after resume",
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 9,
+        result: {
+          submission_id: expect.any(String),
+        },
+      });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 10,
+          method: "collab/wait",
+          params: {
+            parentThreadId: started.result.thread.id,
+            ids: [spawned.result.agent_id],
+            timeout_ms: 50,
+          },
+        })
+      ).resolves.toEqual({
+        id: 10,
+        result: {
+          status: {
+            [spawned.result.agent_id]: "completed",
+          },
+          timed_out: false,
+        },
+      });
+
+      expect(prompts.map((prompt) => prompt.text)).toEqual(["initial task", "after resume"]);
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.item?.type === "collabAgentToolCall" &&
+            notification.params.item.tool === "resumeAgent"
+        )
+      ).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("cascades collab child shutdown when the parent thread is archived", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-archive-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const backend = new TestBackend(async () => {});
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "long running",
+          agent_type: "worker",
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      ) as { params: { thread: { id: string } } } | undefined;
+      expect(childStarted).toBeDefined();
+      const childThreadId = childStarted?.params.thread.id ?? "";
+
+      const subAgents = (await connection.handleMessage({
+        id: 4,
+        method: "thread/list",
+        params: { sourceKinds: ["subAgent"] },
+      })) as { result: { data: Array<{ id: string; source: { type: string } }> } };
+      expect(subAgents.result.data).toEqual([
+        expect.objectContaining({
+          id: childThreadId,
+          source: expect.objectContaining({ type: "subAgent" }),
+        }),
+      ]);
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "thread/archive",
+          params: { threadId: started.result.thread.id },
+        })
+      ).resolves.toEqual({
+        id: 5,
+        result: {},
+      });
+
+      const childRead = (await connection.handleMessage({
+        id: 6,
+        method: "thread/read",
+        params: {
+          threadId: childThreadId,
+          includeTurns: false,
+        },
+      })) as {
+        result: {
+          thread: {
+            status: { type: string };
+            source: { type: string; subAgent: { parentThreadId: string } };
+          };
+        };
+      };
+      expect(childRead.result.thread.status).toEqual({ type: "idle" });
+      expect(childRead.result.thread.source).toMatchObject({
+        type: "subAgent",
+        subAgent: {
+          parentThreadId: started.result.thread.id,
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("interrupts the active collab child turn before starting a replacement turn", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-interrupt-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const prompts: string[] = [];
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      prompts.push(text);
+      if (text !== "replacement task") {
+        return;
+      }
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "done",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "long running task",
+          agent_type: "worker",
+        },
+      })) as { result: { agent_id: string } };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      ) as { params: { thread: { id: string } } } | undefined;
+      expect(childStarted).toBeDefined();
+      const childThreadId = childStarted?.params.thread.id ?? "";
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 4,
+          method: "collab/sendInput",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+            message: "replacement task",
+            interrupt: true,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 4,
+        result: {
+          submission_id: expect.any(String),
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      expect(prompts).toEqual(["long running task", "replacement task"]);
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "turn/completed" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params.turn?.status === "interrupted"
+        )
+      ).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
     }
   });
 

@@ -128,6 +128,11 @@ export interface Disposable {
   dispose(): void;
 }
 
+export interface BackendSessionLaunchConfig {
+  readonly threadId?: string | null;
+  readonly collabSocketPath?: string | null;
+}
+
 /**
  * Adapter-to-model contract.
  *
@@ -144,13 +149,13 @@ export interface IBackend {
   isAlive(): boolean;
 
   /** Start a new backend session and return its opaque session identifier. */
-  createSession(): Promise<string>;
+  createSession(config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Reattach to an existing backend session and return the canonical session identifier. */
-  resumeSession(sessionId: string): Promise<string>;
+  resumeSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Fork a backend session and return the new opaque session identifier. */
-  forkSession(sessionId: string): Promise<string>;
+  forkSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string>;
 
   /** Dispose a backend session when the adapter no longer needs it. */
   disposeSession(sessionId: string): Promise<void>;

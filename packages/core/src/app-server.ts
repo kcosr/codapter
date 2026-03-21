@@ -7,9 +7,16 @@ import type {
   BackendEvent,
   BackendImageInput,
   BackendMessage,
+  BackendSessionLaunchConfig,
   Disposable,
   IBackend,
 } from "./backend.js";
+import {
+  CollabManager,
+  type CollabManagerCreateChildThreadInput,
+  type CollabManagerNotificationSink,
+} from "./collab-manager.js";
+import { CollabUdsListener } from "./collab-uds.js";
 import { CommandExecManager } from "./command-exec.js";
 import { InMemoryConfigStore } from "./config-store.js";
 import {
@@ -134,6 +141,7 @@ export type AppServerOutgoingMessage = JsonRpcEnvelope;
 
 export interface AppServerConnectionOptions {
   readonly backend?: IBackend;
+  readonly collabEnabled?: boolean;
   readonly configStore?: InMemoryConfigStore;
   readonly identity?: AppServerIdentity;
   readonly logger?: AppServerLogger;
@@ -160,6 +168,8 @@ interface ThreadRuntime {
   eventQueue: Promise<void>;
   readyResolver: (() => void) | null;
   readyPromise: Promise<void> | null;
+  managedByCollab: boolean;
+  statusOverride: ThreadStatus | null;
 }
 
 interface PendingToolUserInputRequest {
@@ -707,6 +717,9 @@ function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus
   if (!runtime) {
     return { type: "notLoaded" };
   }
+  if (runtime.statusOverride) {
+    return runtime.statusOverride;
+  }
   switch (runtime.status) {
     case "turn_active":
       return { type: "active", activeFlags: ["turn"] };
@@ -878,6 +891,10 @@ export class AppServerConnection {
     | ((message: AppServerOutgoingMessage) => void | Promise<void>)
     | undefined;
   private readonly commandExecManager: CommandExecManager;
+  private readonly collabEnabled: boolean;
+  private readonly collabManager: CollabManager | null;
+  private readonly collabUdsListener: CollabUdsListener | null;
+  private readonly collabReady: Promise<void>;
   private readonly threadRuntimes = new Map<string, ThreadRuntime>();
   private readonly pendingToolUserInputRequests = new Map<
     string | number,
@@ -912,11 +929,65 @@ export class AppServerConnection {
     this.threadRegistry =
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onMessage = options.onMessage;
+    this.collabEnabled = Boolean(options.collabEnabled && this.backend);
     this.commandExecManager = new CommandExecManager({
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
       },
     });
+    if (this.collabEnabled && this.backend) {
+      const notifySink: CollabManagerNotificationSink = {
+        notify: async (method, params, threadId) => {
+          await this.publish(method, params, threadId);
+        },
+      };
+      this.collabManager = new CollabManager({
+        backend: this.backend,
+        notifySink,
+        resolveParentTurnId: (parentThreadId) =>
+          this.threadRuntimes.get(parentThreadId)?.latestTurnId ??
+          this.threadRuntimes.get(parentThreadId)?.activeTurnId ??
+          "unknown",
+        resolveThreadSessionId: (threadId) => {
+          const runtime = this.threadRuntimes.get(threadId);
+          if (!runtime) {
+            throw new Error(`Thread ${threadId} is not loaded`);
+          }
+          return runtime.sessionId;
+        },
+        createSessionLaunchConfig: (threadId) => this.createBackendSessionLaunchConfig(threadId),
+        createChildThread: async (input) => {
+          await this.createCollabChildThread(input);
+        },
+        startChildTurn: async ({ agent, message }) =>
+          await this.startCollabChildTurn(agent, message),
+        onChildAgentEvent: async ({ agent, event }) => {
+          this.enqueueBackendEvent(agent.threadId, event.turnId, event);
+        },
+        onChildAgentStatusChanged: async ({ agent }) => {
+          this.syncCollabRuntimeState(agent);
+          await this.publishThreadStatus(agent.threadId);
+        },
+      });
+      this.collabUdsListener = new CollabUdsListener({
+        collabManager: this.collabManager,
+        validateParentThread: (parentThreadId) => {
+          if (!this.threadRuntimes.has(parentThreadId)) {
+            throw new Error(`Thread ${parentThreadId} is not loaded`);
+          }
+        },
+      });
+      this.collabReady = this.collabUdsListener.start().catch((error) => {
+        this.logger.warn("Failed to start collab UDS listener", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      });
+    } else {
+      this.collabManager = null;
+      this.collabUdsListener = null;
+      this.collabReady = Promise.resolve();
+    }
     void this.debugLogWriter?.write({
       at: new Date().toISOString(),
       component: "app-server",
@@ -925,6 +996,8 @@ export class AppServerConnection {
   }
 
   async dispose(): Promise<void> {
+    await this.collabUdsListener?.close().catch(() => {});
+    await this.collabManager?.dispose().catch(() => {});
     for (const runtime of this.threadRuntimes.values()) {
       runtime.status = "terminating";
       runtime.readyResolver?.();
@@ -1440,11 +1513,14 @@ export class AppServerConnection {
   private async handleThreadStart(params: unknown): Promise<ThreadStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as ThreadStartParams;
-    const sessionId = await backend.createSession();
+    await this.collabReady;
+    const threadId = randomUUID();
+    const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
     if (parsed.model) {
       await backend.setModel(sessionId, parsed.model);
     }
     const entry = await this.threadRegistry.create({
+      threadId,
       backendSessionId: sessionId,
       backendType: "pi",
       cwd: parsed.cwd ?? process.cwd(),
@@ -1473,6 +1549,11 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    if (entry.source.type === "subAgent") {
+      throw new Error(
+        `Collab child thread ${parsed.threadId} must be resumed via resume_agent, not thread/resume`
+      );
+    }
     const existing = this.threadRuntimes.get(parsed.threadId);
     if (existing) {
       throw new Error(`Thread ${parsed.threadId} is already loaded (status: ${existing.status})`);
@@ -1481,7 +1562,11 @@ export class AppServerConnection {
     const runtime = this.initRuntime(parsed.threadId, entry.backendSessionId);
 
     try {
-      const sessionId = await backend.resumeSession(entry.backendSessionId);
+      await this.collabReady;
+      const sessionId = await backend.resumeSession(
+        entry.backendSessionId,
+        this.createBackendSessionLaunchConfig(parsed.threadId)
+      );
       if (parsed.model) {
         await backend.setModel(sessionId, parsed.model);
       }
@@ -1523,11 +1608,17 @@ export class AppServerConnection {
 
     let forkThreadId: string | null = null;
     try {
-      const sessionId = await backend.forkSession(sourceEntry.backendSessionId);
+      forkThreadId = randomUUID();
+      await this.collabReady;
+      const sessionId = await backend.forkSession(
+        sourceEntry.backendSessionId,
+        this.createBackendSessionLaunchConfig(forkThreadId)
+      );
       if (parsed.model) {
         await backend.setModel(sessionId, parsed.model);
       }
       const entry = await this.threadRegistry.create({
+        threadId: forkThreadId,
         backendSessionId: sessionId,
         backendType: sourceEntry.backendType,
         cwd: parsed.cwd ?? sourceEntry.cwd,
@@ -1537,7 +1628,6 @@ export class AppServerConnection {
         gitInfo: sourceEntry.gitInfo,
       });
 
-      forkThreadId = entry.threadId;
       const forkRuntime = this.initRuntime(entry.threadId, sessionId);
       this.transitionToReady(entry.threadId, forkRuntime);
 
@@ -1618,6 +1708,11 @@ export class AppServerConnection {
               .includes(parsed.searchTerm.toLowerCase())
       )
       .filter((entry) =>
+        !parsed.sourceKinds || parsed.sourceKinds.length === 0
+          ? true
+          : parsed.sourceKinds.includes(entry.source.type)
+      )
+      .filter((entry) =>
         !parsed.modelProviders || parsed.modelProviders.length === 0
           ? true
           : parsed.modelProviders.includes(entry.modelProvider ?? DEFAULT_MODEL_PROVIDER)
@@ -1665,6 +1760,17 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadArchiveParams;
     const entry = await this.getThreadEntry(parsed.threadId);
+    if (this.collabManager) {
+      const collabAgent = this.collabManager.getAgentByThreadId(parsed.threadId);
+      if (collabAgent) {
+        await this.collabManager.close({
+          parentThreadId: collabAgent.parentThreadId,
+          id: collabAgent.agentId,
+        });
+      } else {
+        await this.collabManager.shutdownByParent(parsed.threadId);
+      }
+    }
     const runtime = this.threadRuntimes.get(parsed.threadId);
     if (runtime) {
       const from = runtime.status;
@@ -1713,6 +1819,12 @@ export class AppServerConnection {
   private async handleTurnStart(params: unknown): Promise<TurnStartResponse> {
     const backend = this.requireBackend();
     const parsed = params as TurnStartParams;
+    const existingRuntime = this.threadRuntimes.get(parsed.threadId);
+    if (existingRuntime?.managedByCollab) {
+      throw new Error(
+        `Collab child thread ${parsed.threadId} must receive input through send_input, not turn/start`
+      );
+    }
     const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
@@ -1960,7 +2072,44 @@ export class AppServerConnection {
     runtime.machine = null;
     runtime.activeTurnId = null;
     runtime.status = "ready";
+    runtime.statusOverride = null;
     await this.publishThreadStatus(threadId);
+  }
+
+  private syncCollabRuntimeState(agent: {
+    threadId: string;
+    sessionId: string;
+    status: string;
+  }): void {
+    const runtime = this.threadRuntimes.get(agent.threadId);
+    if (!runtime || !runtime.managedByCollab) {
+      return;
+    }
+
+    runtime.sessionId = agent.sessionId;
+
+    if (agent.status === "completed" || agent.status === "errored" || agent.status === "shutdown") {
+      runtime.machine = null;
+      runtime.activeTurnId = null;
+      runtime.status = "ready";
+      runtime.statusOverride = null;
+    }
+    if (agent.status === "errored" || agent.status === "shutdown") {
+      this.rejectPendingToolUserInputRequests(
+        agent.threadId,
+        `Collab agent thread ${agent.threadId} closed before server request resolved`
+      );
+    }
+  }
+
+  private rejectPendingToolUserInputRequests(threadId: string, message: string): void {
+    for (const [requestId, request] of this.pendingToolUserInputRequests) {
+      if (request.threadId !== threadId) {
+        continue;
+      }
+      this.pendingToolUserInputRequests.delete(requestId);
+      request.reject(new Error(message));
+    }
   }
 
   private normalizeUserInputs(input: readonly UserInput[]): {
@@ -2025,9 +2174,9 @@ export class AppServerConnection {
       path: null,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
-      source: "appServer",
-      agentNickname: null,
-      agentRole: null,
+      source: entry.source,
+      agentNickname: entry.agentNickname,
+      agentRole: entry.agentRole,
       gitInfo: entry.gitInfo,
       name: entry.name,
       turns,
@@ -2085,6 +2234,14 @@ export class AppServerConnection {
   }
 
   private initRuntime(threadId: string, sessionId: string): ThreadRuntime {
+    return this.createRuntime(threadId, sessionId, false);
+  }
+
+  private createRuntime(
+    threadId: string,
+    sessionId: string,
+    managedByCollab: boolean
+  ): ThreadRuntime {
     let readyResolver: (() => void) | null = null;
     const readyPromise = new Promise<void>((resolve) => {
       readyResolver = resolve;
@@ -2099,6 +2256,8 @@ export class AppServerConnection {
       eventQueue: Promise.resolve(),
       readyResolver,
       readyPromise,
+      managedByCollab,
+      statusOverride: null,
     };
     this.threadRuntimes.set(threadId, runtime);
     this.logTransition(threadId, "none", "starting");
@@ -2108,6 +2267,7 @@ export class AppServerConnection {
   private transitionToReady(threadId: string, runtime: ThreadRuntime): void {
     const from = runtime.status;
     runtime.status = "ready";
+    runtime.statusOverride = null;
     runtime.readyResolver?.();
     runtime.readyResolver = null;
     runtime.readyPromise = null;
@@ -2137,5 +2297,85 @@ export class AppServerConnection {
       throw new Error("No backend configured");
     }
     return this.backend;
+  }
+
+  get collabSocketPath(): string | null {
+    return this.collabUdsListener?.socketPath ?? null;
+  }
+
+  private createBackendSessionLaunchConfig(threadId: string): BackendSessionLaunchConfig {
+    if (!this.collabEnabled || !this.collabUdsListener) {
+      return {};
+    }
+
+    return {
+      threadId,
+      collabSocketPath: this.collabUdsListener.socketPath,
+    };
+  }
+
+  private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {
+    const parentEntry = await this.getThreadEntry(input.parentThreadId);
+    const entry = await this.threadRegistry.create({
+      threadId: input.threadId,
+      backendSessionId: input.sessionId,
+      backendType: "pi",
+      cwd: parentEntry.cwd ?? process.cwd(),
+      preview: "",
+      modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      name: null,
+      source: {
+        type: "subAgent",
+        subAgent: {
+          type: "threadSpawn",
+          parentThreadId: input.parentThreadId,
+          depth: input.depth,
+          agentNickname: input.nickname,
+          agentRole: input.role,
+        },
+      },
+      agentNickname: input.nickname,
+      agentRole: input.role,
+      gitInfo: null,
+    });
+    const runtime = this.createRuntime(entry.threadId, input.sessionId, true);
+    this.transitionToReady(entry.threadId, runtime);
+
+    const thread = this.buildThread(entry, []);
+    await this.publish("thread/started", { thread }, entry.threadId);
+    await this.publishThreadStatus(entry.threadId);
+  }
+
+  private async startCollabChildTurn(
+    agent: { threadId: string },
+    _message: string
+  ): Promise<string> {
+    const runtime = this.threadRuntimes.get(agent.threadId);
+    if (!runtime) {
+      throw new Error(`Thread ${agent.threadId} is not loaded`);
+    }
+
+    const entry = await this.getThreadEntry(agent.threadId);
+    if (runtime.machine && runtime.activeTurnId) {
+      const interruptedTurnId = runtime.activeTurnId;
+      await runtime.machine.interrupt();
+      await this.finishTurn(agent.threadId, interruptedTurnId);
+    }
+    const turnId = randomUUID();
+    const cwd = entry.cwd ?? process.cwd();
+    const machine = new TurnStateMachine(agent.threadId, turnId, cwd, {
+      notify: async (method, payload) => {
+        await this.publish(method, payload, agent.threadId);
+      },
+    });
+
+    runtime.status = "turn_active";
+    runtime.statusOverride = null;
+    runtime.activeTurnId = turnId;
+    runtime.latestTurnId = turnId;
+    runtime.machine = machine;
+    await this.publishThreadStatus(agent.threadId);
+    await machine.emitStarted();
+    return turnId;
   }
 }

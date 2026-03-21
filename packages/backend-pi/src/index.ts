@@ -7,6 +7,7 @@ import type {
   BackendImageInput,
   BackendMessage,
   BackendModelSummary,
+  BackendSessionLaunchConfig,
   Disposable,
   IBackend,
 } from "@codapter/core";
@@ -27,6 +28,7 @@ export interface PiBackendOptions {
   readonly cwd?: string;
   readonly debugLogFilePath?: string | null;
   readonly idleTimeoutMs?: number;
+  readonly collabExtensionPath?: string | null;
 }
 
 interface ManagedSession {
@@ -102,9 +104,11 @@ export class PiBackend implements IBackend {
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly modelCache = new Map<string, BackendModelSummary>();
+  private readonly launchConfigs = new Map<string, BackendSessionLaunchConfig>();
   private initialized = false;
   private disposed = false;
   private capabilities: BackendCapabilities | null = null;
+  private readonly collabExtensionPath: string | null;
 
   constructor(options: PiBackendOptions = {}) {
     this.sessionDir = options.sessionDir ?? defaultSessionDir();
@@ -134,6 +138,7 @@ export class PiBackend implements IBackend {
     }
     this.launchOptions = launchOptions;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
+    this.collabExtensionPath = options.collabExtensionPath ?? null;
     this.stateStore = new PiBackendStateStore(this.sessionDir);
   }
 
@@ -164,27 +169,33 @@ export class PiBackend implements IBackend {
     return this.initialized && !this.disposed;
   }
 
-  async createSession(): Promise<string> {
+  async createSession(config?: BackendSessionLaunchConfig): Promise<string> {
     this.assertReady();
     const sessionId = opaqueSessionId();
-    const process = this.createProcess(sessionId);
+    const process = this.createProcess(sessionId, config);
     const snapshot = await process.startFresh();
     const record = await this.persistSnapshot(sessionId, snapshot);
     const session = { process, record };
     this.sessions.set(sessionId, session);
+    if (config) {
+      this.launchConfigs.set(sessionId, config);
+    }
     this.resetIdleTimer(sessionId);
 
     return sessionId;
   }
 
-  async resumeSession(sessionId: string): Promise<string> {
+  async resumeSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string> {
     this.assertReady();
+    if (config) {
+      this.launchConfigs.set(sessionId, config);
+    }
     await this.ensureActiveSession(sessionId);
     this.resetIdleTimer(sessionId);
     return sessionId;
   }
 
-  async forkSession(sessionId: string): Promise<string> {
+  async forkSession(sessionId: string, config?: BackendSessionLaunchConfig): Promise<string> {
     this.assertReady();
     const source = await this.ensureActiveSession(sessionId);
     if (!source.record.sessionFile) {
@@ -192,7 +203,7 @@ export class PiBackend implements IBackend {
     }
 
     const forkedSessionId = opaqueSessionId();
-    const process = this.createProcess(forkedSessionId);
+    const process = this.createProcess(forkedSessionId, config);
     await process.attachSession(source.record.sessionFile);
 
     const anchors = await process.getForkMessages();
@@ -210,6 +221,9 @@ export class PiBackend implements IBackend {
     const record = await this.persistSnapshot(forkedSessionId, snapshot, source.record.createdAt);
     const session = { process, record };
     this.sessions.set(forkedSessionId, session);
+    if (config) {
+      this.launchConfigs.set(forkedSessionId, config);
+    }
     this.resetIdleTimer(forkedSessionId);
     return forkedSessionId;
   }
@@ -224,6 +238,7 @@ export class PiBackend implements IBackend {
       await session.process.dispose().catch(() => {});
       this.sessions.delete(sessionId);
     }
+    this.launchConfigs.delete(sessionId);
   }
 
   async readSessionHistory(sessionId: string): Promise<BackendMessage[]> {
@@ -410,12 +425,22 @@ export class PiBackend implements IBackend {
     }
   }
 
-  private createProcess(sessionId: string): PiProcessSession {
-    return new PiProcessSession({
+  private createProcess(
+    sessionId: string,
+    launchConfig?: BackendSessionLaunchConfig
+  ): PiProcessSession {
+    const effectiveLaunchConfig = launchConfig ?? this.launchConfigs.get(sessionId);
+    const options: PiProcessLaunchOptions = {
       sessionDir: this.sessionDir,
       opaqueSessionId: sessionId,
       ...this.launchOptions,
-    });
+      ...(this.collabExtensionPath !== null
+        ? { collabExtensionPath: this.collabExtensionPath }
+        : {}),
+      ...(effectiveLaunchConfig ? { launchConfig: effectiveLaunchConfig } : {}),
+    };
+
+    return new PiProcessSession(options);
   }
 
   private async ensureActiveSession(sessionId: string): Promise<ManagedSession> {

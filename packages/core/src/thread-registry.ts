@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { GitInfo } from "./protocol.js";
+import type { GitInfo, SessionSource } from "./protocol.js";
 
 export interface ThreadRegistryLogger {
   warn(message: string, context?: Record<string, unknown>): void;
@@ -20,10 +20,14 @@ export interface ThreadRegistryEntry {
   readonly cwd: string | null;
   readonly preview: string | null;
   readonly modelProvider: string | null;
+  readonly source: SessionSource;
+  readonly agentNickname: string | null;
+  readonly agentRole: string | null;
   readonly gitInfo: GitInfo | null;
 }
 
 export interface CreateThreadRegistryEntry {
+  readonly threadId?: string;
   readonly backendSessionId: string;
   readonly backendType: string;
   readonly hidden?: boolean;
@@ -32,6 +36,9 @@ export interface CreateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
+  readonly source?: SessionSource;
+  readonly agentNickname?: string | null;
+  readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
 }
 
@@ -45,6 +52,9 @@ export interface UpdateThreadRegistryEntry {
   readonly cwd?: string | null;
   readonly preview?: string | null;
   readonly modelProvider?: string | null;
+  readonly source?: SessionSource;
+  readonly agentNickname?: string | null;
+  readonly agentRole?: string | null;
   readonly gitInfo?: GitInfo | null;
 }
 
@@ -77,6 +87,24 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     return false;
   }
 
+  const source = value.source;
+  const validSource =
+    source === undefined ||
+    source === null ||
+    (isRecord(source) && source.type === "appServer") ||
+    (isRecord(source) &&
+      source.type === "subAgent" &&
+      isRecord(source.subAgent) &&
+      source.subAgent.type === "threadSpawn" &&
+      typeof source.subAgent.parentThreadId === "string" &&
+      typeof source.subAgent.depth === "number" &&
+      (typeof source.subAgent.agentNickname === "string" ||
+        source.subAgent.agentNickname === null ||
+        source.subAgent.agentNickname === undefined) &&
+      (typeof source.subAgent.agentRole === "string" ||
+        source.subAgent.agentRole === null ||
+        source.subAgent.agentRole === undefined));
+
   return (
     typeof value.threadId === "string" &&
     typeof value.backendSessionId === "string" &&
@@ -89,6 +117,13 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     (typeof value.cwd === "string" || value.cwd === null) &&
     (typeof value.preview === "string" || value.preview === null) &&
     (typeof value.modelProvider === "string" || value.modelProvider === null) &&
+    validSource &&
+    (typeof value.agentNickname === "string" ||
+      value.agentNickname === null ||
+      value.agentNickname === undefined) &&
+    (typeof value.agentRole === "string" ||
+      value.agentRole === null ||
+      value.agentRole === undefined) &&
     (isRecord(value.gitInfo) || value.gitInfo === null)
   );
 }
@@ -154,6 +189,9 @@ export class ThreadRegistry {
       this.entries.set(entry.threadId, {
         ...entry,
         hidden: entry.hidden ?? false,
+        source: entry.source ?? { type: "appServer" },
+        agentNickname: entry.agentNickname ?? null,
+        agentRole: entry.agentRole ?? null,
       });
     }
 
@@ -177,7 +215,7 @@ export class ThreadRegistry {
 
     const now = new Date().toISOString();
     const entry: ThreadRegistryEntry = {
-      threadId: randomUUID(),
+      threadId: input.threadId ?? randomUUID(),
       backendSessionId: input.backendSessionId,
       backendType: input.backendType,
       hidden: input.hidden ?? false,
@@ -188,6 +226,9 @@ export class ThreadRegistry {
       cwd: input.cwd ?? null,
       preview: input.preview ?? null,
       modelProvider: input.modelProvider ?? null,
+      source: input.source ?? { type: "appServer" },
+      agentNickname: input.agentNickname ?? null,
+      agentRole: input.agentRole ?? null,
       gitInfo: input.gitInfo ?? null,
     };
 
