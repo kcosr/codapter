@@ -6,7 +6,13 @@
 
 ### Added
 
+- Support `--listen stdio` alongside other transports (TCP WebSocket, UDS). ([#3](https://github.com/kcosr/codapter/pull/3))
+- Add release script with integrated version bump and GitHub release creation. ([#3](https://github.com/kcosr/codapter/pull/3))
+- Add `AGENTS.md` for agent onboarding. ([#3](https://github.com/kcosr/codapter/pull/3))
+
 ### Changed
+
+- Restructure `CHANGELOG.md` to use `[Unreleased]` section format. ([#3](https://github.com/kcosr/codapter/pull/3))
 
 ### Fixed
 
