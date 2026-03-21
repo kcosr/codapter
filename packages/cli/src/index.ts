@@ -15,7 +15,7 @@ import {
 } from "@codapter/core";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
 
-const VERSION = "0.0.1";
+const VERSION = "0.0.0";
 const ANALYTICS_FLAG = "--analytics-default-enabled";
 
 export interface CliEnvironment {
@@ -48,11 +48,14 @@ export interface ListenerSet {
 
 export interface ListenerOptions {
   readonly backend: IBackend;
+  readonly stdin?: NodeJS.ReadableStream;
+  readonly stdout?: NodeJS.WritableStream;
 }
 
 type ParsedListenTarget =
   | { kind: "tcp"; host: string; port: number }
-  | { kind: "unix"; socketPath: string };
+  | { kind: "unix"; socketPath: string }
+  | { kind: "stdio" };
 
 const defaultEnvironment: Required<Pick<CliEnvironment, "stdin" | "stdout" | "stderr" | "env">> = {
   stdin: process.stdin,
@@ -181,7 +184,11 @@ export async function runCli(
         return { exitCode: 0 };
       }
 
-      const listeners = await startAppServerListeners(parsed.listenTargets, { backend });
+      const listeners = await startAppServerListeners(parsed.listenTargets, {
+        backend,
+        stdin,
+        stdout,
+      });
       stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
 
       try {
@@ -204,6 +211,11 @@ export async function startAppServerListeners(
   listenTargets: readonly string[],
   options: ListenerOptions
 ): Promise<ListenerSet> {
+  const stdioCount = listenTargets.filter((target) => target === "stdio").length;
+  if (stdioCount > 1) {
+    throw new Error("Only one stdio listener is allowed");
+  }
+
   const listeners: ListenerHandle[] = [];
 
   try {
@@ -263,11 +275,67 @@ async function runStdioAppServer(
   }
 }
 
+function startStdioListener(
+  stdin: NodeJS.ReadableStream,
+  stdout: NodeJS.WritableStream,
+  options: ListenerOptions
+): ListenerHandle {
+  const connection = new AppServerConnection({
+    backend: options.backend,
+    onMessage(message) {
+      stdout.write(serializeNdjsonLine(message));
+    },
+  });
+  const readline = createInterface({
+    input: stdin,
+    crlfDelay: Number.POSITIVE_INFINITY,
+  });
+
+  const done = (async () => {
+    try {
+      for await (const line of readline) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+
+        try {
+          const message = parseNdjsonLine(trimmed);
+          const response = await connection.handleMessage(message);
+          if (response) {
+            stdout.write(serializeNdjsonLine(response));
+          }
+        } catch {
+          stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
+        }
+      }
+    } finally {
+      readline.close();
+      await connection.dispose();
+    }
+  })();
+
+  return {
+    address: "stdio",
+    async close() {
+      readline.close();
+      await done;
+    },
+  };
+}
+
 async function startAppServerListener(
   rawTarget: string,
   options: ListenerOptions
 ): Promise<ListenerHandle> {
   const target = parseListenTarget(rawTarget);
+
+  if (target.kind === "stdio") {
+    if (!options.stdin || !options.stdout) {
+      throw new Error("stdio listener requires stdin and stdout streams");
+    }
+    return startStdioListener(options.stdin, options.stdout, options);
+  }
 
   if (target.kind === "unix") {
     return startUnixListener(target.socketPath, options);
@@ -277,6 +345,10 @@ async function startAppServerListener(
 }
 
 function parseListenTarget(rawTarget: string): ParsedListenTarget {
+  if (rawTarget === "stdio") {
+    return { kind: "stdio" };
+  }
+
   if (rawTarget.startsWith("unix://")) {
     const socketPath = rawTarget.slice("unix://".length);
     if (!socketPath.startsWith("/")) {
