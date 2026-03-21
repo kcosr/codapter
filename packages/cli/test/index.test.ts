@@ -84,6 +84,20 @@ describe("parseListenTargets", () => {
     });
   });
 
+  it("accepts stdio as a listen target", () => {
+    expect(parseListenTargets(["--listen", "stdio"])).toEqual({
+      listenTargets: ["stdio"],
+      analyticsDefaultEnabledSeen: false,
+    });
+  });
+
+  it("accepts stdio alongside other listen targets", () => {
+    expect(parseListenTargets(["--listen", "stdio", "--listen", "ws://127.0.0.1:8080"])).toEqual({
+      listenTargets: ["stdio", "ws://127.0.0.1:8080"],
+      analyticsDefaultEnabledSeen: false,
+    });
+  });
+
   it("falls back to CODAPTER_LISTEN when no explicit listen flags are present", () => {
     expect(
       parseListenTargets([], { CODAPTER_LISTEN: "ws://127.0.0.1:8080, unix:///tmp/codapter.sock" })
@@ -147,6 +161,70 @@ describe("runCli", () => {
         platformOs: expect.any(String),
       },
     });
+  });
+
+  it("runs stdio via --listen stdio with shutdown signal", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    const stdoutChunks: string[] = [];
+    const stderrChunks: string[] = [];
+
+    stdout.setEncoding("utf8");
+    stderr.setEncoding("utf8");
+    stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+    const abortController = new AbortController();
+
+    const resultPromise = runCli(["app-server", "--listen", "stdio"], {
+      stdin,
+      stdout,
+      stderr,
+      env: {},
+      shutdownSignal: abortController.signal,
+    });
+
+    // Wait for the "Listening on" message on stderr
+    await new Promise<void>((resolve) => {
+      const check = () => {
+        if (stderrChunks.join("").includes("Listening on")) {
+          resolve();
+        }
+      };
+      stderr.on("data", check);
+      check();
+    });
+
+    expect(stderrChunks.join("")).toContain("stdio");
+
+    // Send an initialize request over stdio
+    const responsePromise = new Promise<unknown>((resolve) => {
+      stdout.once("data", (chunk: string) => {
+        resolve(JSON.parse(chunk));
+      });
+    });
+
+    stdin.write(
+      `${JSON.stringify({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      })}\n`
+    );
+
+    expect(await responsePromise).toMatchObject({
+      id: 1,
+      result: { userAgent: expect.any(String) },
+    });
+
+    // Shut down cleanly
+    abortController.abort();
+    const result = await resultPromise;
+    expect(result).toEqual({ exitCode: 0 });
   });
 });
 
@@ -214,6 +292,106 @@ describe("startAppServerListeners", () => {
 
     await runtime.close();
     await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("serves initialize over stdio alongside TCP WebSocket", async () => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    stdout.setEncoding("utf8");
+
+    const backend = createPiBackend();
+    await backend.initialize();
+
+    try {
+      const listeners = await startAppServerListeners(["stdio", "ws://127.0.0.1:0"], {
+        backend,
+        stdin,
+        stdout,
+      });
+
+      try {
+        // Test stdio listener
+        const stdioResponse = new Promise<unknown>((resolve) => {
+          stdout.once("data", (chunk: string) => {
+            resolve(JSON.parse(chunk));
+          });
+        });
+
+        stdin.write(
+          `${JSON.stringify({
+            id: 1,
+            method: "initialize",
+            params: {
+              clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+              capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+            },
+          })}\n`
+        );
+
+        expect(await stdioResponse).toMatchObject({
+          id: 1,
+          result: { userAgent: expect.any(String) },
+        });
+
+        // Test TCP WebSocket listener concurrently
+        const wsAddress = listeners.addresses.find((a) => a.startsWith("ws://"));
+        expect(wsAddress).toBeDefined();
+        // biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+        const websocket = await connectWebSocket(wsAddress!);
+        websocket.send(
+          JSON.stringify({
+            id: 2,
+            method: "initialize",
+            params: {
+              clientInfo: { name: "codapter-test-ws", title: null, version: "0.0.1" },
+              capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+            },
+          })
+        );
+
+        expect(await waitForWebSocketMessage(websocket)).toMatchObject({
+          id: 2,
+          result: { userAgent: expect.any(String) },
+        });
+
+        websocket.close();
+      } finally {
+        stdin.end();
+        await listeners.close();
+      }
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it("rejects duplicate stdio listeners", async () => {
+    const backend = createPiBackend();
+    await backend.initialize();
+
+    try {
+      await expect(
+        startAppServerListeners(["stdio", "stdio"], {
+          backend,
+          stdin: new PassThrough(),
+          stdout: new PassThrough(),
+        })
+      ).rejects.toThrow("Only one stdio listener is allowed");
+    } finally {
+      await backend.dispose();
+    }
+  });
+
+  it("rejects stdio listener without stdin/stdout streams", async () => {
+    const backend = createPiBackend();
+    await backend.initialize();
+
+    try {
+      await expect(startAppServerListeners(["stdio"], { backend })).rejects.toThrow(
+        "stdio listener requires stdin and stdout streams"
+      );
+    } finally {
+      await backend.dispose();
+    }
   });
 
   it("rejects replacing a non-socket UDS path", async () => {
