@@ -530,6 +530,12 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 - **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
 - **Config not persisted**: Settings changed through the GUI are lost when the adapter restarts
 
+## Roadmap
+
+- Support additional backends, including Codex
+- Support additional upstream clients and protocols beyond the current Codex Desktop app-server flow
+- Align adapter types with upstream Codex and `pi-mono` definitions instead of maintaining local copies
+
 ## License
 
 See [LICENSE](LICENSE) for details.
