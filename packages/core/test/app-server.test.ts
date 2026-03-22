@@ -1107,7 +1107,7 @@ describe("AppServerConnection", () => {
             [spawned.result.agent_id]: "completed",
           },
           messages: {
-            [spawned.result.agent_id]: null,
+            [spawned.result.agent_id]: "done:review this",
           },
           timed_out: false,
         },
@@ -1552,6 +1552,123 @@ describe("AppServerConnection", () => {
           },
         },
       ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("hydrates an active collab child resume as a single turn with the user message first", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-hydrate-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      if (text !== "initial task") {
+        return;
+      }
+
+      backend.sessionHistories.set(sessionId, [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text }],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ]);
+
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "tool_start",
+          sessionId,
+          turnId,
+          toolCallId: "tool-1",
+          toolName: "bash",
+          input: { command: ["echo", "hi"] },
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "initial task",
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childThreads = (await connection.handleMessage({
+        id: 4,
+        method: "thread/list",
+        params: { sourceKinds: ["subAgent"] },
+      })) as { result: { data: Array<{ id: string }> } };
+      const childThreadId = childThreads.result.data[0]?.id ?? "";
+      expect(childThreadId).toBeTruthy();
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "thread/resume",
+          params: {
+            threadId: childThreadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            id: childThreadId,
+            status: { type: "active", activeFlags: ["turn"] },
+            turns: [
+              {
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "initial task" }],
+                  },
+                  {
+                    type: "commandExecution",
+                    command: "echo hi",
+                    status: "inProgress",
+                  },
+                ],
+                status: "inProgress",
+              },
+            ],
+          },
+        },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();

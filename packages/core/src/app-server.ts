@@ -163,6 +163,7 @@ interface ThreadRuntime {
   sessionId: string;
   status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
   activeTurnId: string | null;
+  activeTurnInput: JsonValue[] | null;
   latestTurnId: string | null;
   machine: TurnStateMachine | null;
   subscription: Disposable | null;
@@ -735,6 +736,56 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
 
   finalizeTurn();
   return turns;
+}
+
+function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
+  return input.map((item): JsonValue => {
+    switch (item.type) {
+      case "text":
+        return { type: "text", text: item.text };
+      case "image":
+        return { type: "image", url: item.url };
+      case "localImage":
+        return { type: "localImage", path: item.path };
+      case "skill":
+        return { type: "skill", name: item.name, path: item.path };
+      case "mention":
+        return { type: "mention", name: item.name, path: item.path };
+    }
+  });
+}
+
+function buildTurnsWithActiveSnapshot(turns: Turn[], runtime?: ThreadRuntime): Turn[] {
+  if (!runtime?.machine) {
+    return turns;
+  }
+
+  const snapshot = runtime.machine.snapshot;
+  const activeTurnInput = runtime.activeTurnInput;
+  if (
+    activeTurnInput &&
+    !snapshot.items.some((item) => item.type === "userMessage") &&
+    activeTurnInput.length > 0
+  ) {
+    snapshot.items.unshift({
+      type: "userMessage",
+      id: `${snapshot.id}_user`,
+      content: structuredClone(activeTurnInput),
+    });
+  }
+
+  if (activeTurnInput && turns.length > 0) {
+    const lastTurn = turns.at(-1);
+    const lastUserMessage = lastTurn?.items.find((item) => item.type === "userMessage");
+    if (
+      lastUserMessage &&
+      JSON.stringify(lastUserMessage.content) === JSON.stringify(activeTurnInput)
+    ) {
+      return [...turns.slice(0, -1), snapshot];
+    }
+  }
+
+  return [...turns, snapshot];
 }
 
 function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
@@ -1677,10 +1728,10 @@ export class AppServerConnection {
         });
       }
       const history = await backend.readSessionHistory(existing.sessionId);
-      const turns = buildTurns(history, entry.cwd ?? process.cwd());
-      if (existing.machine) {
-        turns.push(existing.machine.snapshot);
-      }
+      const turns = buildTurnsWithActiveSnapshot(
+        buildTurns(history, entry.cwd ?? process.cwd()),
+        existing
+      );
       const thread = this.buildThread(entry, turns);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1733,7 +1784,10 @@ export class AppServerConnection {
 
       const history = await backend.readSessionHistory(sessionId);
       this.transitionToReady(parsed.threadId, runtime);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
+      const thread = this.buildThread(
+        entry,
+        buildTurnsWithActiveSnapshot(buildTurns(history, entry.cwd ?? process.cwd()), runtime)
+      );
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1846,14 +1900,14 @@ export class AppServerConnection {
     const runtime = this.threadRuntimes.get(parsed.threadId);
     const turns =
       parsed.includeTurns && this.backend
-        ? buildTurns(
-            await this.backend.readSessionHistory(entry.backendSessionId),
-            entry.cwd ?? process.cwd()
+        ? buildTurnsWithActiveSnapshot(
+            buildTurns(
+              await this.backend.readSessionHistory(entry.backendSessionId),
+              entry.cwd ?? process.cwd()
+            ),
+            runtime
           )
         : [];
-    if (runtime?.machine && parsed.includeTurns) {
-      turns.push(runtime.machine.snapshot);
-    }
     return { thread: this.buildThread(entry, turns) };
   }
 
@@ -2051,6 +2105,7 @@ export class AppServerConnection {
 
     const turnId = randomUUID();
     const cwd = parsed.cwd ?? entry.cwd ?? process.cwd();
+    const activeTurnInput = toUserMessageContent(parsed.input);
     const machine = new TurnStateMachine(parsed.threadId, turnId, cwd, {
       notify: async (method, payload) => {
         await this.publish(method, payload, parsed.threadId);
@@ -2059,6 +2114,7 @@ export class AppServerConnection {
 
     runtime.status = "turn_active";
     runtime.activeTurnId = turnId;
+    runtime.activeTurnInput = activeTurnInput;
     runtime.latestTurnId = turnId;
     runtime.machine = machine;
     runtime.subscription?.dispose();
@@ -2278,6 +2334,7 @@ export class AppServerConnection {
     }
     runtime.machine = null;
     runtime.activeTurnId = null;
+    runtime.activeTurnInput = null;
     runtime.status = "ready";
     runtime.statusOverride = null;
     await this.publishThreadStatus(threadId);
@@ -2298,6 +2355,7 @@ export class AppServerConnection {
     if (agent.status === "completed" || agent.status === "errored" || agent.status === "shutdown") {
       runtime.machine = null;
       runtime.activeTurnId = null;
+      runtime.activeTurnInput = null;
       runtime.status = "ready";
       runtime.statusOverride = null;
     }
@@ -2455,6 +2513,7 @@ export class AppServerConnection {
     const from = runtime.status;
     runtime.status = "starting";
     runtime.activeTurnId = null;
+    runtime.activeTurnInput = null;
     runtime.machine = null;
     runtime.subscription?.dispose();
     runtime.subscription = null;
@@ -2479,6 +2538,7 @@ export class AppServerConnection {
       sessionId,
       status: "starting",
       activeTurnId: null,
+      activeTurnInput: null,
       latestTurnId: null,
       machine: null,
       subscription: null,
@@ -2581,7 +2641,7 @@ export class AppServerConnection {
 
   private async startCollabChildTurn(
     agent: { threadId: string },
-    _message: string
+    message: string
   ): Promise<string> {
     const runtime = this.threadRuntimes.get(agent.threadId);
     if (!runtime) {
@@ -2596,6 +2656,9 @@ export class AppServerConnection {
     }
     const turnId = randomUUID();
     const cwd = entry.cwd ?? process.cwd();
+    const activeTurnInput = toUserMessageContent([
+      { type: "text", text: message, text_elements: [] },
+    ]);
     const machine = new TurnStateMachine(agent.threadId, turnId, cwd, {
       notify: async (method, payload) => {
         await this.publish(method, payload, agent.threadId);
@@ -2605,6 +2668,7 @@ export class AppServerConnection {
     runtime.status = "turn_active";
     runtime.statusOverride = null;
     runtime.activeTurnId = turnId;
+    runtime.activeTurnInput = activeTurnInput;
     runtime.latestTurnId = turnId;
     runtime.machine = machine;
     await this.publishThreadStatus(agent.threadId);

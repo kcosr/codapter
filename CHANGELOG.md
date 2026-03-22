@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed Pi-backed sub-agent thread hydration so reopening a live child thread keeps the active user prompt and assistant/tool bubbles in the correct order instead of splitting the same prompt across duplicated turns.
 - Fixed collab sub-agent payloads to keep `spawnAgent` item ids stable across start/completion notifications and propagate sub-agent thread preview/role metadata so the Codex Desktop UI renders created agents correctly.
 - Fixed `scripts/stdio-tap.mjs` to preserve `CODAPTER_DEBUG_LOG_FILE` so debug JSONL logs can be generated when using the tap wrapper.
 - Fixed Pi-backed thread payloads to include the real backend session file path and return collab child threads as `idle` after native `thread/resume`, matching Codex Desktop's native sub-agent reopen flow more closely.
