@@ -235,7 +235,7 @@ export class CollabManager {
 
   async wait(req: CollabWaitRequest): Promise<CollabWaitResponse> {
     if (req.ids.length === 0) {
-      return { status: {}, timed_out: false };
+      return { status: {}, messages: {}, timed_out: false };
     }
 
     for (const agentId of req.ids) {
@@ -255,7 +255,11 @@ export class CollabManager {
       item.status = "completed";
       item.agentsStates = this.collectAgentStates(req.ids);
       await this.emitToolItem("item/completed", req.parentThreadId, item);
-      return { status: immediate, timed_out: false };
+      return {
+        status: immediate,
+        messages: this.collectFinalMessages(req.ids),
+        timed_out: false,
+      };
     }
 
     const response = await new Promise<CollabWaitResponse>((resolve) => {
@@ -273,6 +277,7 @@ export class CollabManager {
         timer: setTimeout(() => {
           waiter.resolve({
             status: this.collectFinalStatuses(req.ids),
+            messages: this.collectFinalMessages(req.ids),
             timed_out: true,
           });
         }, timeoutMs),
@@ -369,6 +374,7 @@ export class CollabManager {
     for (const waiter of this.waiters.values()) {
       waiter.resolve({
         status: {},
+        messages: {},
         timed_out: true,
       });
     }
@@ -610,6 +616,7 @@ export class CollabManager {
       }
       waiter.resolve({
         status: this.collectFinalStatuses(waiter.ids),
+        messages: this.collectFinalMessages(waiter.ids),
         timed_out: false,
       });
     }
@@ -701,5 +708,20 @@ export class CollabManager {
       }
     }
     return states;
+  }
+
+  private collectFinalMessages(agentIds: readonly string[]): Record<string, string | null> {
+    const messages: Record<string, string | null> = {};
+    for (const agentId of agentIds) {
+      const agent = this.agents.get(agentId);
+      if (!agent) {
+        messages[agentId] = null;
+        continue;
+      }
+      if (this.isFinalStatus(agent.status)) {
+        messages[agentId] = agent.completionMessage;
+      }
+    }
+    return messages;
   }
 }

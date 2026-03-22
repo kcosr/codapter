@@ -910,6 +910,9 @@ describe("AppServerConnection", () => {
           status: {
             [spawned.result.agent_id]: "completed",
           },
+          messages: {
+            [spawned.result.agent_id]: null,
+          },
           timed_out: false,
         },
       });
@@ -1148,6 +1151,9 @@ describe("AppServerConnection", () => {
           status: {
             [spawned.result.agent_id]: "completed",
           },
+          messages: {
+            [spawned.result.agent_id]: "done:after resume",
+          },
           timed_out: false,
         },
       });
@@ -1314,6 +1320,9 @@ describe("AppServerConnection", () => {
         result: {
           status: {
             [spawned.result.agent_id]: "completed",
+          },
+          messages: {
+            [spawned.result.agent_id]: "done:after native resume",
           },
           timed_out: false,
         },

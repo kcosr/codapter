@@ -349,7 +349,7 @@ export default async function collabExtension(pi: ExtensionApi): Promise<void> {
     name: "wait_agent",
     label: "Wait Agent",
     description:
-      "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Pass multiple ids to wait for whichever finishes first. Prefer longer waits (minutes) to avoid busy polling.",
+      "Wait for agents to reach a final status. Read the agent's final output from messages[agent_id] when status[agent_id] is completed. Returns empty status/messages when timed out. Pass multiple ids to wait for whichever finishes first. Prefer longer waits (minutes) to avoid busy polling.",
     parameters: WaitAgentParams,
     execute: (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) =>
       collabCall("collab/wait", params, WAIT_TIMEOUT_MS, signal),

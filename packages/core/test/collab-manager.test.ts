@@ -163,6 +163,9 @@ describe("CollabManager", () => {
       status: {
         [spawned.agent_id]: "completed",
       },
+      messages: {
+        [spawned.agent_id]: "done",
+      },
       timed_out: false,
     });
     expect(statusChanges).toEqual(["running", "completed"]);
@@ -192,6 +195,9 @@ describe("CollabManager", () => {
     ).resolves.toEqual({
       status: {
         [spawned.agent_id]: "errored",
+      },
+      messages: {
+        [spawned.agent_id]: "boom",
       },
       timed_out: false,
     });
@@ -249,6 +255,9 @@ describe("CollabManager", () => {
       status: {
         [spawned.agent_id]: "completed",
       },
+      messages: {
+        [spawned.agent_id]: null,
+      },
       timed_out: false,
     });
   });
@@ -270,6 +279,7 @@ describe("CollabManager", () => {
 
       await expect(waitPromise).resolves.toEqual({
         status: {},
+        messages: {},
         timed_out: true,
       });
     } finally {
@@ -301,6 +311,9 @@ describe("CollabManager", () => {
       status: {
         [first.agent_id]: "completed",
       },
+      messages: {
+        [first.agent_id]: null,
+      },
       timed_out: false,
     });
   });
@@ -330,6 +343,9 @@ describe("CollabManager", () => {
     ).resolves.toEqual({
       status: {
         [spawned.agent_id]: "completed",
+      },
+      messages: {
+        [spawned.agent_id]: "child output",
       },
       timed_out: false,
     });
@@ -462,6 +478,9 @@ describe("CollabManager", () => {
     ).resolves.toEqual({
       status: {
         [childAgent.agent_id]: "shutdown",
+      },
+      messages: {
+        [childAgent.agent_id]: null,
       },
       timed_out: false,
     });

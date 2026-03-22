@@ -74,6 +74,7 @@ export interface CollabWaitRequest {
 
 export interface CollabWaitResponse {
   status: Record<string, CollabAgentStatus>;
+  messages: Record<string, string | null>;
   timed_out: boolean;
 }
 

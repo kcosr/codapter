@@ -19,6 +19,7 @@
 - Fixed collab tool guidance so Pi-backed agents are not encouraged to close subagents immediately after a successful result, which broke direct follow-up from the child thread in Codex Desktop.
 - Fixed Pi-backed ephemeral helper threads to stay hidden and omit persistent paths, so Codex Desktop no longer switches the main view into internal title-generator conversations.
 - Fixed duplicate text streaming for Pi-backed subagent threads by preventing child-thread turns from subscribing to backend events twice.
+- Fixed `wait_agent` tool results to include sub-agent completion messages, so parent agents can read the child output instead of guessing or claiming it was missing.
 
 ### Removed
 
