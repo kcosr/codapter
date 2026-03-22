@@ -120,6 +120,22 @@ describe("parseListenTargets", () => {
     });
   });
 
+  it("enables collab via CODAPTER_COLLAB", () => {
+    expect(parseListenTargets(["--listen", "stdio"], { CODAPTER_COLLAB: "1" })).toEqual({
+      listenTargets: ["stdio"],
+      collabEnabled: true,
+      analyticsDefaultEnabledSeen: false,
+    });
+  });
+
+  it("treats falsy CODAPTER_COLLAB values as disabled", () => {
+    expect(parseListenTargets(["--listen", "stdio"], { CODAPTER_COLLAB: "0" })).toEqual({
+      listenTargets: ["stdio"],
+      collabEnabled: false,
+      analyticsDefaultEnabledSeen: false,
+    });
+  });
+
   it("rejects non-root websocket listen paths", async () => {
     const backend = createPiBackend();
     await backend.initialize();

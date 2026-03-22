@@ -2381,7 +2381,7 @@ export class AppServerConnection {
       backendSessionId: input.sessionId,
       backendType: "pi",
       cwd: parentEntry.cwd ?? process.cwd(),
-      preview: "",
+      preview: input.preview,
       modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       name: null,
       source: {

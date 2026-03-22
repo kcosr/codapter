@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BackendEvent, IBackend } from "../src/backend.js";
 import { CollabManager } from "../src/collab-manager.js";
 import type { CollabManagerNotificationSink } from "../src/collab-manager.js";
+import type { CollabManagerCreateChildThreadInput } from "../src/collab-manager.js";
 
 class TestBackend implements IBackend {
   private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
@@ -83,6 +84,7 @@ function createManager(options: {
   const notifications: Array<{ method: string; params: unknown; threadId?: string }> = [];
   const statusChanges: string[] = [];
   const childThreadIds: string[] = [];
+  const childThreadInputs: CollabManagerCreateChildThreadInput[] = [];
 
   const manager = new CollabManager({
     backend,
@@ -101,6 +103,7 @@ function createManager(options: {
     },
     async createChildThread(input) {
       childThreadIds.push(input.threadId);
+      childThreadInputs.push(input);
     },
     onChildAgentStatusChanged({ agent }) {
       statusChanges.push(agent.status);
@@ -108,7 +111,15 @@ function createManager(options: {
     config: options.config,
   });
 
-  return { backend, manager, notifications, parentThreadId, statusChanges, childThreadIds };
+  return {
+    backend,
+    manager,
+    notifications,
+    parentThreadId,
+    statusChanges,
+    childThreadIds,
+    childThreadInputs,
+  };
 }
 
 async function spawnAgent(manager: CollabManager, parentThreadId: string, message = "do work") {
@@ -472,6 +483,52 @@ describe("CollabManager", () => {
       "item/completed",
       "item/started",
       "item/completed",
+    ]);
+  });
+
+  it("emits native-codex collab spawn item shapes", async () => {
+    const notifications: Array<{ method: string; params: unknown; threadId?: string }> = [];
+    const { manager, parentThreadId, childThreadIds, childThreadInputs } = createManager({
+      notifySink: {
+        async notify(method, params, threadId) {
+          notifications.push({ method, params, threadId });
+        },
+      },
+    });
+
+    await spawnAgent(manager, parentThreadId, "run date");
+
+    const started = notifications[0]?.params as {
+      item: {
+        id: string;
+        receiverThreadIds: string[];
+        agentsStates: Record<string, { status: string; message: string | null }>;
+      };
+    };
+    expect(started.item.receiverThreadIds).toEqual([]);
+    expect(started.item.agentsStates).toEqual({});
+
+    const completed = notifications[1]?.params as {
+      item: {
+        id: string;
+        receiverThreadIds: string[];
+        agentsStates: Record<string, { status: string; message: string | null }>;
+      };
+    };
+    const childThreadId = childThreadIds[0] ?? "";
+    expect(completed.item.id).toBe(started.item.id);
+    expect(completed.item.receiverThreadIds).toEqual([childThreadId]);
+    expect(completed.item.agentsStates).toEqual({
+      [childThreadId]: {
+        status: "pendingInit",
+        message: null,
+      },
+    });
+    expect(childThreadInputs).toEqual([
+      expect.objectContaining({
+        role: "default",
+        preview: "run date",
+      }),
     ]);
   });
 });

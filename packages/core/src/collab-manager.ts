@@ -52,6 +52,7 @@ export interface CollabManagerCreateChildThreadInput {
   threadId: string;
   sessionId: string;
   depth: number;
+  preview: string;
 }
 
 export interface CollabManagerOptions {
@@ -119,7 +120,7 @@ export class CollabManager {
     this.assertSpawnLimits(req.parentThreadId);
     const agentId = randomUUID();
     const nickname = this.assignNickname();
-    const role = req.agentType ?? null;
+    const role = req.agentType ?? "default";
     const depth = this.depthForParent(req.parentThreadId) + 1;
     const threadId = randomUUID();
     const sessionLaunchConfig = this.createSessionLaunchConfig(threadId);
@@ -143,6 +144,7 @@ export class CollabManager {
         threadId,
         sessionId,
         depth,
+        preview: req.message.slice(0, 120),
       });
 
       const agent: CollabAgent = {
@@ -159,22 +161,23 @@ export class CollabManager {
       this.agents.set(agentId, agent);
       this.subscribeToAgent(agent);
 
-      const item = this.createToolItem(req.parentThreadId, "spawnAgent", {
-        receiverThreadIds: [agent.threadId],
+      const startedItem = this.createToolItem(req.parentThreadId, "spawnAgent", {
+        receiverThreadIds: [],
         prompt: req.message,
         model: req.model ?? null,
         reasoningEffort: req.reasoningEffort ?? null,
-        agentIds: [agentId],
       });
+      await this.emitToolItem("item/started", req.parentThreadId, startedItem);
 
-      await this.emitToolItem("item/started", req.parentThreadId, item);
       await this.beginAgentTurn(agent, req.message);
+
+      startedItem.status = "completed";
+      startedItem.receiverThreadIds = [agent.threadId];
+      startedItem.agentsStates = this.collectAgentStates([agentId]);
+      await this.emitToolItem("item/completed", req.parentThreadId, startedItem);
+
       this.transitionAgent(agentId, "running", null);
       void this.startPrompt(agentId, req.message);
-
-      item.status = "completed";
-      item.agentsStates = this.collectAgentStates([agentId]);
-      await this.emitToolItem("item/completed", req.parentThreadId, item);
 
       return {
         agent_id: agentId,
@@ -208,7 +211,6 @@ export class CollabManager {
       prompt: req.message,
       model: null,
       reasoningEffort: null,
-      agentIds: [agent.agentId],
     });
     await this.emitToolItem("item/started", req.parentThreadId, item);
 
@@ -245,7 +247,6 @@ export class CollabManager {
       prompt: null,
       model: null,
       reasoningEffort: null,
-      agentIds: req.ids,
     });
     await this.emitToolItem("item/started", req.parentThreadId, item);
 
@@ -296,7 +297,6 @@ export class CollabManager {
       prompt: null,
       model: null,
       reasoningEffort: null,
-      agentIds: [agent.agentId],
     });
     await this.emitToolItem("item/started", req.parentThreadId, item);
 
@@ -328,7 +328,6 @@ export class CollabManager {
       prompt: null,
       model: null,
       reasoningEffort: null,
-      agentIds: [agent.agentId],
     });
     await this.emitToolItem("item/started", req.parentThreadId, item);
 
@@ -638,7 +637,6 @@ export class CollabManager {
       prompt: string | null;
       model: string | null;
       reasoningEffort: string | null;
-      agentIds: readonly string[];
     }
   ): CollabAgentToolCallItem {
     return {
@@ -651,7 +649,7 @@ export class CollabManager {
       prompt: options.prompt,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
-      agentsStates: this.collectAgentStates(options.agentIds),
+      agentsStates: {},
     };
   }
 
@@ -682,12 +680,10 @@ export class CollabManager {
     const states: Record<string, CollabAgentState> = {};
     for (const agentId of agentIds) {
       const agent = this.agents.get(agentId);
-      states[agentId] = agent
-        ? collabStateFromAgent(agent)
-        : {
-            status: "notFound",
-            message: null,
-          };
+      if (!agent) {
+        continue;
+      }
+      states[agent.threadId] = collabStateFromAgent(agent);
     }
     return states;
   }

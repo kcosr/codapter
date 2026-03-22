@@ -21,7 +21,7 @@ function ts() {
 
 // Spawn the real CLI, passing through args and env
 const child = spawn(target, process.argv.slice(2), {
-  env: { ...process.env, CODAPTER_DEBUG_LOG_FILE: undefined },
+  env: { ...process.env },
   stdio: ["pipe", "pipe", "pipe"],
 });
 

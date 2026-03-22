@@ -784,6 +784,7 @@ describe("AppServerConnection", () => {
         method: "thread/started",
         params: {
           thread: {
+            preview: "review this",
             source: {
               subAgent: {
                 thread_spawn: {

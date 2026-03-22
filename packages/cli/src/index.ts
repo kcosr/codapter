@@ -18,6 +18,15 @@ import { type RawData, type WebSocket, WebSocketServer } from "ws";
 const VERSION = "0.0.1";
 const ANALYTICS_FLAG = "--analytics-default-enabled";
 
+function envFlagEnabled(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 export interface CliEnvironment {
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
@@ -71,7 +80,7 @@ export function parseListenTargets(
   env: NodeJS.ProcessEnv = process.env
 ): AppServerArgs {
   const listenTargets: string[] = [];
-  let collabEnabled = false;
+  let collabEnabled = envFlagEnabled(env.CODAPTER_COLLAB);
   let analyticsDefaultEnabledSeen = false;
 
   for (let index = 0; index < args.length; index += 1) {

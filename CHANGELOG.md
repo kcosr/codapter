@@ -6,9 +6,14 @@
 
 ### Added
 
+- Added `CODAPTER_COLLAB` env var as an alternative to `--collab` for enabling collab sub-agent support.
+
 ### Changed
 
 ### Fixed
+
+- Fixed collab sub-agent payloads to keep `spawnAgent` item ids stable across start/completion notifications and propagate sub-agent thread preview/role metadata so the Codex Desktop UI renders created agents correctly.
+- Fixed `scripts/stdio-tap.mjs` to preserve `CODAPTER_DEBUG_LOG_FILE` so debug JSONL logs can be generated when using the tap wrapper.
 
 ### Removed
 
