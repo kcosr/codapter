@@ -2132,7 +2132,10 @@ export class AppServerConnection {
     runtime.latestTurnId = turnId;
     runtime.machine = machine;
     runtime.subscription?.dispose();
-    if (isSubAgentThreadSource(entry.source)) {
+    const collabAgent = isSubAgentThreadSource(entry.source)
+      ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
+      : null;
+    if (collabAgent) {
       runtime.subscription = null;
       this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
     } else {
@@ -2178,7 +2181,10 @@ export class AppServerConnection {
       await runtime.machine.interrupt();
     }
     await this.finishTurn(parsed.threadId, parsed.turnId);
-    if (isSubAgentThreadSource(entry.source)) {
+    if (
+      isSubAgentThreadSource(entry.source) &&
+      this.collabManager?.getAgentByThreadId(parsed.threadId)
+    ) {
       this.collabManager?.syncExternalTurnInterrupt(parsed.threadId);
     }
     return {};

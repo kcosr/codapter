@@ -1591,6 +1591,193 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("falls back to direct backend events for resumed sub-agent threads without a live collab agent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-orphan-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      if (text !== "run pwd") {
+        return;
+      }
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "tool_start",
+          sessionId,
+          turnId,
+          toolCallId: "tool-pwd",
+          toolName: "bash",
+          input: { command: "pwd" },
+        });
+        backend.emit(sessionId, {
+          type: "tool_update",
+          sessionId,
+          turnId,
+          toolCallId: "tool-pwd",
+          toolName: "bash",
+          output: {
+            content: [{ type: "text", text: "/repo\n" }],
+          },
+          isCumulative: true,
+        });
+        backend.emit(sessionId, {
+          type: "tool_end",
+          sessionId,
+          turnId,
+          toolCallId: "tool-pwd",
+          toolName: "bash",
+          output: {
+            content: [{ type: "text", text: "/repo\n" }],
+          },
+          isError: false,
+        });
+        backend.emit(sessionId, {
+          type: "text_delta",
+          sessionId,
+          turnId,
+          delta: "Current working directory is `/repo`.",
+        });
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+          text: "Current working directory is `/repo`.",
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      const entry = await threadRegistry.create({
+        threadId: "child-thread",
+        backendSessionId: "session_1",
+        backendType: "pi",
+        cwd: "/repo",
+        preview: "run pwd",
+        model: "anthropic/claude-opus-4-6",
+        modelProvider: "pi",
+        reasoningEffort: "medium",
+        source: {
+          subAgent: {
+            thread_spawn: {
+              parent_thread_id: "parent-thread",
+              depth: 1,
+              agent_nickname: "Robie",
+              agent_role: "default",
+            },
+          },
+        },
+        agentNickname: "Robie",
+        agentRole: "default",
+        gitInfo: null,
+      });
+
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 2,
+          method: "thread/resume",
+          params: {
+            threadId: entry.threadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            id: entry.threadId,
+            status: { type: "idle" },
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 3,
+          method: "turn/start",
+          params: {
+            threadId: entry.threadId,
+            input: [{ type: "text", text: "run pwd", text_elements: [] }],
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 3,
+        result: {
+          turn: {
+            status: "inProgress",
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/commandExecution/outputDelta" &&
+            notification.params?.threadId === entry.threadId
+        )
+      ).toMatchObject({
+        method: "item/commandExecution/outputDelta",
+        params: {
+          threadId: entry.threadId,
+          delta: "/repo\n",
+        },
+      });
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.threadId === entry.threadId &&
+            notification.params?.item?.type === "commandExecution"
+        )
+      ).toMatchObject({
+        method: "item/completed",
+        params: {
+          threadId: entry.threadId,
+          item: {
+            type: "commandExecution",
+            aggregatedOutput: "/repo\n",
+            status: "completed",
+          },
+        },
+      });
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "turn/completed" &&
+            notification.params?.threadId === entry.threadId
+        )
+      ).toMatchObject({
+        method: "turn/completed",
+        params: {
+          threadId: entry.threadId,
+          turn: {
+            status: "completed",
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
   it("hydrates an active collab child resume as a single turn with the user message first", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-hydrate-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
