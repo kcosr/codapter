@@ -25,6 +25,18 @@ This file is a lightweight, internal onboarding note for agents working in this 
 - Run `npm run check` to run build + lint + test together.
 - If you cannot run tests, call it out explicitly in your response.
 
+## GUI Debugging
+
+- Checked-in launcher scripts live at `scripts/pi.sh` and `scripts/codex.sh`.
+- `scripts/pi.sh` launches Codex Desktop against `dist/codapter.mjs`, enables collab, preserves the JSONL debug log, and writes stdio traffic to `/tmp/codapter-pi-stdio.log`.
+- `scripts/codex.sh` launches the native Codex backend through the same stdio tap and writes traffic to `/tmp/codapter-codex-stdio.log`.
+- Both launchers enable Electron remote debugging on port `9222` for Chrome DevTools MCP inspection.
+- Before Pi GUI repros, clear persisted thread state with `rm -f ~/.local/share/codapter/threads.json` when old threads are polluting the sidebar.
+- When reproducing Pi sub-agent flows in the GUI, switch the model picker to `Claude Opus 4.6` before sending the prompt. `Claude Haiku 3.5` has produced misleading failures in this setup.
+- Use the Chrome DevTools MCP against the Electron page to inspect the sidebar, composer, and sub-agent thread UI while the app is running.
+- Compare `/tmp/codapter-pi-stdio.log` against `/tmp/codapter-codex-stdio.log` first when native Codex and Pi diverge. Use `/tmp/codapter-pi.jsonl` for app-server level debug events from Codapter.
+- Stop the GUI between backend switches so the next run binds cleanly to the remote debugging port and starts with fresh logs.
+
 ## Changelog
 
 Location: `CHANGELOG.md` (root)

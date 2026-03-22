@@ -7,6 +7,7 @@
 ### Added
 
 - Added `CODAPTER_COLLAB` env var as an alternative to `--collab` for enabling collab sub-agent support.
+- Added checked-in `scripts/pi.sh` and `scripts/codex.sh` launchers plus AGENTS onboarding notes for Codex Desktop GUI debugging with Chrome DevTools MCP.
 
 ### Changed
 
