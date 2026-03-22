@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed Pi-backed thread resume to preserve the loaded live turn id for the latest turn, so reopening a sub-agent thread no longer duplicates the assistant reply above the hydrated user/assistant turn.
 - Fixed Pi-backed sub-agent thread hydration so reopening a live child thread keeps the active user prompt and assistant/tool bubbles in the correct order instead of splitting the same prompt across duplicated turns.
 - Fixed collab sub-agent payloads to keep `spawnAgent` item ids stable across start/completion notifications and propagate sub-agent thread preview/role metadata so the Codex Desktop UI renders created agents correctly.
 - Fixed `scripts/stdio-tap.mjs` to preserve `CODAPTER_DEBUG_LOG_FILE` so debug JSONL logs can be generated when using the tap wrapper.

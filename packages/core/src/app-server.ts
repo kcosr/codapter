@@ -755,9 +755,22 @@ function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
   });
 }
 
-function buildTurnsWithActiveSnapshot(turns: Turn[], runtime?: ThreadRuntime): Turn[] {
-  if (!runtime?.machine) {
+function buildTurnsWithRuntimeState(turns: Turn[], runtime?: ThreadRuntime): Turn[] {
+  if (!runtime) {
     return turns;
+  }
+
+  if (!runtime.machine) {
+    if (!runtime.latestTurnId || turns.length === 0) {
+      return turns;
+    }
+
+    const lastTurn = turns.at(-1);
+    if (!lastTurn || lastTurn.id === runtime.latestTurnId) {
+      return turns;
+    }
+
+    return [...turns.slice(0, -1), { ...lastTurn, id: runtime.latestTurnId }];
   }
 
   const snapshot = runtime.machine.snapshot;
@@ -1728,7 +1741,7 @@ export class AppServerConnection {
         });
       }
       const history = await backend.readSessionHistory(existing.sessionId);
-      const turns = buildTurnsWithActiveSnapshot(
+      const turns = buildTurnsWithRuntimeState(
         buildTurns(history, entry.cwd ?? process.cwd()),
         existing
       );
@@ -1786,7 +1799,7 @@ export class AppServerConnection {
       this.transitionToReady(parsed.threadId, runtime);
       const thread = this.buildThread(
         entry,
-        buildTurnsWithActiveSnapshot(buildTurns(history, entry.cwd ?? process.cwd()), runtime)
+        buildTurnsWithRuntimeState(buildTurns(history, entry.cwd ?? process.cwd()), runtime)
       );
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
@@ -1900,7 +1913,7 @@ export class AppServerConnection {
     const runtime = this.threadRuntimes.get(parsed.threadId);
     const turns =
       parsed.includeTurns && this.backend
-        ? buildTurnsWithActiveSnapshot(
+        ? buildTurnsWithRuntimeState(
             buildTurns(
               await this.backend.readSessionHistory(entry.backendSessionId),
               entry.cwd ?? process.cwd()

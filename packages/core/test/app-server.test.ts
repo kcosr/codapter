@@ -1675,6 +1675,111 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("reuses the loaded live turn id when resuming a completed thread", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-live-turn-id-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      backend.sessionHistories.set(sessionId, [
+        {
+          id: "message-0",
+          role: "user",
+          content: [{ type: "text", text }],
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: "message-1",
+          role: "assistant",
+          content: [{ type: "text", text: "Today's date is 2026-03-22." }],
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ]);
+
+      queueMicrotask(() => {
+        backend.emit(sessionId, {
+          type: "message_end",
+          sessionId,
+          turnId,
+          text: "Today's date is 2026-03-22.",
+        });
+      });
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      const turnStarted = (await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "What is today's date?", text_elements: [] }],
+        },
+      })) as { result: { turn: { id: string } } };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      await expect(
+        connection.handleMessage({
+          id: 4,
+          method: "thread/resume",
+          params: {
+            threadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 4,
+        result: {
+          thread: {
+            id: threadId,
+            turns: [
+              {
+                id: turnStarted.result.turn.id,
+                status: "completed",
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "What is today's date?" }],
+                  },
+                  {
+                    type: "agentMessage",
+                    text: "Today's date is 2026-03-22.",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
   it("cascades collab child shutdown when the parent thread is archived", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-archive-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
