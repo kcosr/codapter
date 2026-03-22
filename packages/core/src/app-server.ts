@@ -1356,11 +1356,13 @@ export class AppServerConnection {
   private resolveRequestedModel(
     cwd: string | null,
     requestedModel: string | null | undefined,
-    collaborationMode?: JsonValue | null
+    collaborationMode?: JsonValue | null,
+    persistedModel?: string | null
   ): string | null {
     return (
       requestedModel ??
       resolveCollaborationModeSetting(collaborationMode, "model") ??
+      persistedModel ??
       this.readEffectiveConfig(cwd).model
     );
   }
@@ -1368,11 +1370,13 @@ export class AppServerConnection {
   private resolveRequestedReasoningEffort(
     cwd: string | null,
     requestedEffort: string | null | undefined,
-    collaborationMode?: JsonValue | null
+    collaborationMode?: JsonValue | null,
+    persistedEffort?: string | null
   ): string | null {
     return (
       requestedEffort ??
       resolveCollaborationModeSetting(collaborationMode, "reasoning_effort") ??
+      persistedEffort ??
       this.readEffectiveConfig(cwd).model_reasoning_effort
     );
   }
@@ -1586,10 +1590,12 @@ export class AppServerConnection {
     const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
     const sessionPath = await backend.getSessionPath(sessionId);
     const ephemeral = parsed.ephemeral ?? false;
-    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model);
+    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model, null, null);
     const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
       parsed.cwd ?? null,
-      parsed.config?.model_reasoning_effort as string | null | undefined
+      parsed.config?.model_reasoning_effort as string | null | undefined,
+      null,
+      null
     );
     if (effectiveModel) {
       await backend.setModel(sessionId, effectiveModel);
@@ -1603,7 +1609,9 @@ export class AppServerConnection {
       path: ephemeral ? null : sessionPath,
       cwd: parsed.cwd ?? process.cwd(),
       preview: "",
+      model: effectiveModel,
       modelProvider: parsed.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      reasoningEffort: effectiveReasoningEffort,
       gitInfo: null,
     });
 
@@ -1615,6 +1623,8 @@ export class AppServerConnection {
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
+      entry.model,
+      entry.reasoningEffort,
       effectiveModel,
       parsed.cwd ?? null,
       parsed.approvalPolicy ?? null,
@@ -1628,10 +1638,17 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     let entry = await this.getThreadEntry(parsed.threadId);
-    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? entry.cwd, parsed.model);
+    const effectiveModel = this.resolveRequestedModel(
+      parsed.cwd ?? entry.cwd,
+      parsed.model,
+      null,
+      entry.model
+    );
     const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
       parsed.cwd ?? entry.cwd,
-      parsed.config?.model_reasoning_effort as string | null | undefined
+      parsed.config?.model_reasoning_effort as string | null | undefined,
+      null,
+      entry.reasoningEffort
     );
     const collabAgent = isSubAgentThreadSource(entry.source)
       ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
@@ -1648,8 +1665,16 @@ export class AppServerConnection {
       }
       const sessionPath = await backend.getSessionPath(existing.sessionId);
       const resolvedPath = entry.ephemeral ? null : sessionPath;
-      if (entry.path !== resolvedPath) {
-        entry = await this.threadRegistry.update(parsed.threadId, { path: resolvedPath });
+      if (
+        entry.path !== resolvedPath ||
+        entry.model !== effectiveModel ||
+        entry.reasoningEffort !== effectiveReasoningEffort
+      ) {
+        entry = await this.threadRegistry.update(parsed.threadId, {
+          path: resolvedPath,
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
+        });
       }
       const history = await backend.readSessionHistory(existing.sessionId);
       const turns = buildTurns(history, entry.cwd ?? process.cwd());
@@ -1659,6 +1684,8 @@ export class AppServerConnection {
       const thread = this.buildThread(entry, turns);
       return await this.buildThreadExecutionResponse(
         thread,
+        entry.model,
+        entry.reasoningEffort,
         effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
@@ -1690,10 +1717,17 @@ export class AppServerConnection {
       if (isSubAgentThreadSource(entry.source)) {
         this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
       }
-      if (entry.backendSessionId !== sessionId || entry.path !== sessionPath) {
+      if (
+        entry.backendSessionId !== sessionId ||
+        entry.path !== sessionPath ||
+        entry.model !== effectiveModel ||
+        entry.reasoningEffort !== effectiveReasoningEffort
+      ) {
         entry = await this.threadRegistry.update(parsed.threadId, {
           backendSessionId: sessionId,
           path: entry.ephemeral ? null : sessionPath,
+          model: effectiveModel,
+          reasoningEffort: effectiveReasoningEffort,
         });
       }
 
@@ -1703,6 +1737,8 @@ export class AppServerConnection {
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
+        entry.model,
+        entry.reasoningEffort,
         effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
@@ -1738,11 +1774,15 @@ export class AppServerConnection {
       await this.collabReady;
       const effectiveModel = this.resolveRequestedModel(
         parsed.cwd ?? sourceEntry.cwd,
-        parsed.model
+        parsed.model,
+        null,
+        sourceEntry.model
       );
       const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
         parsed.cwd ?? sourceEntry.cwd,
-        parsed.config?.model_reasoning_effort as string | null | undefined
+        parsed.config?.model_reasoning_effort as string | null | undefined,
+        null,
+        sourceEntry.reasoningEffort
       );
       const sessionId = await backend.forkSession(
         sourceEntry.backendSessionId,
@@ -1762,7 +1802,9 @@ export class AppServerConnection {
         path: ephemeral ? null : sessionPath,
         cwd: parsed.cwd ?? sourceEntry.cwd,
         preview: sourceEntry.preview,
+        model: effectiveModel,
         modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
+        reasoningEffort: effectiveReasoningEffort,
         name: sourceEntry.name,
         gitInfo: sourceEntry.gitInfo,
       });
@@ -1776,6 +1818,8 @@ export class AppServerConnection {
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
+        entry.model,
+        entry.reasoningEffort,
         effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
@@ -1965,7 +2009,14 @@ export class AppServerConnection {
     const effectiveModel = this.resolveRequestedModel(
       parsed.cwd ?? entry.cwd,
       parsed.model,
-      parsed.collaborationMode ?? null
+      parsed.collaborationMode ?? null,
+      entry.model
+    );
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? entry.cwd,
+      parsed.effort,
+      parsed.collaborationMode ?? null,
+      entry.reasoningEffort
     );
     if (effectiveModel) {
       await backend.setModel(runtime.sessionId, effectiveModel);
@@ -1974,6 +2025,8 @@ export class AppServerConnection {
       hidden?: boolean;
       preview?: string | null;
       cwd?: string | null;
+      model?: string | null;
+      reasoningEffort?: string | null;
     } = {};
     if (!entry.preview && preview) {
       if (isInternalTitlePrompt(text)) {
@@ -1985,6 +2038,12 @@ export class AppServerConnection {
     }
     if (parsed.cwd) {
       threadPatch.cwd = parsed.cwd;
+    }
+    if (entry.model !== effectiveModel) {
+      threadPatch.model = effectiveModel;
+    }
+    if (entry.reasoningEffort !== effectiveReasoningEffort) {
+      threadPatch.reasoningEffort = effectiveReasoningEffort;
     }
     if (Object.keys(threadPatch).length > 0) {
       entry = await this.threadRegistry.update(parsed.threadId, threadPatch);
@@ -2333,6 +2392,8 @@ export class AppServerConnection {
 
   private async buildThreadExecutionResponse(
     thread: Thread,
+    persistedModel: string | null,
+    persistedReasoningEffort: string | null,
     requestedModel: string | null,
     requestedCwd: string | null,
     requestedApprovalPolicy: string | null,
@@ -2346,14 +2407,18 @@ export class AppServerConnection {
 
     return {
       thread,
-      model: requestedModel ?? defaultModel?.model ?? "pi-default",
+      model: requestedModel ?? persistedModel ?? defaultModel?.model ?? "pi-default",
       modelProvider: thread.modelProvider,
       serviceTier: null,
       cwd,
       approvalPolicy: requestedApprovalPolicy ?? DEFAULT_APPROVAL_POLICY,
       approvalsReviewer: requestedApprovalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
       sandbox: buildSandboxPolicy(requestedSandboxMode, cwd),
-      reasoningEffort: requestedReasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
+      reasoningEffort:
+        requestedReasoningEffort ??
+        persistedReasoningEffort ??
+        defaultModel?.defaultReasoningEffort ??
+        null,
     };
   }
 
@@ -2488,7 +2553,9 @@ export class AppServerConnection {
       path,
       cwd: parentEntry.cwd ?? process.cwd(),
       preview: input.preview,
+      model: input.model,
       modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
+      reasoningEffort: input.reasoningEffort,
       name: null,
       source: {
         subAgent: {

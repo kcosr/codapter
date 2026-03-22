@@ -23,7 +23,9 @@ export interface ThreadRegistryEntry {
   readonly archived: boolean;
   readonly cwd: string | null;
   readonly preview: string | null;
+  readonly model: string | null;
   readonly modelProvider: string | null;
+  readonly reasoningEffort: string | null;
   readonly source: StoredSessionSource;
   readonly agentNickname: string | null;
   readonly agentRole: string | null;
@@ -41,7 +43,9 @@ export interface CreateThreadRegistryEntry {
   readonly archived?: boolean;
   readonly cwd?: string | null;
   readonly preview?: string | null;
+  readonly model?: string | null;
   readonly modelProvider?: string | null;
+  readonly reasoningEffort?: string | null;
   readonly source?: StoredSessionSource;
   readonly agentNickname?: string | null;
   readonly agentRole?: string | null;
@@ -59,7 +63,9 @@ export interface UpdateThreadRegistryEntry {
   readonly archived?: boolean;
   readonly cwd?: string | null;
   readonly preview?: string | null;
+  readonly model?: string | null;
   readonly modelProvider?: string | null;
+  readonly reasoningEffort?: string | null;
   readonly source?: StoredSessionSource;
   readonly agentNickname?: string | null;
   readonly agentRole?: string | null;
@@ -126,7 +132,11 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     typeof value.archived === "boolean" &&
     (typeof value.cwd === "string" || value.cwd === null) &&
     (typeof value.preview === "string" || value.preview === null) &&
+    (typeof value.model === "string" || value.model === null || value.model === undefined) &&
     (typeof value.modelProvider === "string" || value.modelProvider === null) &&
+    (typeof value.reasoningEffort === "string" ||
+      value.reasoningEffort === null ||
+      value.reasoningEffort === undefined) &&
     validSource &&
     (typeof value.agentNickname === "string" ||
       value.agentNickname === null ||
@@ -202,10 +212,12 @@ export class ThreadRegistry {
         ephemeral: entry.ephemeral ?? false,
         hidden: entry.hidden ?? false,
         path: entry.path ?? null,
+        model: entry.model ?? null,
         source:
           rawSource === "appServer" || rawSource === undefined || rawSource === null
             ? { type: "appServer" }
             : entry.source,
+        reasoningEffort: entry.reasoningEffort ?? null,
         agentNickname: entry.agentNickname ?? null,
         agentRole: entry.agentRole ?? null,
       });
@@ -243,7 +255,9 @@ export class ThreadRegistry {
       archived: input.archived ?? false,
       cwd: input.cwd ?? null,
       preview: input.preview ?? null,
+      model: input.model ?? null,
       modelProvider: input.modelProvider ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
       source: input.source ?? { type: "appServer" },
       agentNickname: input.agentNickname ?? null,
       agentRole: input.agentRole ?? null,

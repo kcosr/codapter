@@ -53,6 +53,8 @@ export interface CollabManagerCreateChildThreadInput {
   sessionId: string;
   depth: number;
   preview: string;
+  model: string | null;
+  reasoningEffort: string | null;
 }
 
 export interface CollabManagerOptions {
@@ -145,6 +147,8 @@ export class CollabManager {
         sessionId,
         depth,
         preview: req.message.slice(0, 120),
+        model: req.model ?? null,
+        reasoningEffort: req.reasoningEffort ?? null,
       });
 
       const agent: CollabAgent = {

@@ -22,6 +22,7 @@
 - Fixed `wait_agent` tool results to include sub-agent completion messages, so parent agents can read the child output instead of guessing or claiming it was missing.
 - Fixed Pi-backed live model switching so `turn/start` honors the GUI-selected model even when the desktop app omits `params.model` and only sends the selection through collaboration/config state.
 - Fixed the Codapter config store to persist selected model and reasoning effort to disk, so the Codex Desktop picker survives restart and resumed Pi threads inherit the configured model.
+- Fixed Pi-backed threads to persist their own model and reasoning effort, so reopening an Opus sub-agent no longer resets it to the parent/default GPT model in Codex Desktop.
 
 ### Removed
 

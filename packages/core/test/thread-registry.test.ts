@@ -47,14 +47,18 @@ describe("ThreadRegistry", () => {
       archived: true,
       name: "Renamed",
       path: "/sessions/session_1.jsonl",
+      model: "anthropic/claude-opus-4-6",
       modelProvider: "openai",
+      reasoningEffort: "medium",
       gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });
     expect(updated).toMatchObject({
       archived: true,
       name: "Renamed",
       path: "/sessions/session_1.jsonl",
+      model: "anthropic/claude-opus-4-6",
       modelProvider: "openai",
+      reasoningEffort: "medium",
       gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });
 

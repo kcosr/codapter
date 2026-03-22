@@ -1199,6 +1199,8 @@ describe("AppServerConnection", () => {
           parentThreadId: started.result.thread.id,
           message: "initial task",
           agent_type: "worker",
+          model: "anthropic/claude-opus-4-6",
+          reasoning_effort: "medium",
         },
       })) as { result: { agent_id: string } };
 
@@ -1434,6 +1436,8 @@ describe("AppServerConnection", () => {
           parentThreadId: started.result.thread.id,
           message: "initial task",
           agent_type: "worker",
+          model: "anthropic/claude-opus-4-6",
+          reasoning_effort: "medium",
         },
       })) as { result: { agent_id: string } };
 
@@ -1475,6 +1479,8 @@ describe("AppServerConnection", () => {
       ).resolves.toMatchObject({
         id: 6,
         result: {
+          model: "anthropic/claude-opus-4-6",
+          reasoningEffort: "medium",
           thread: {
             id: childThreadId,
             status: { type: "idle" },
@@ -1525,6 +1531,10 @@ describe("AppServerConnection", () => {
       });
 
       expect(prompts).toEqual(["initial task", "after native resume"]);
+      expect(backend.setModelCalls).toContainEqual({
+        sessionId: "session_2",
+        modelId: "anthropic/claude-opus-4-6",
+      });
       expect(
         notifications.filter(
           (notification) =>
