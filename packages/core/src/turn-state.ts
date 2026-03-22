@@ -13,6 +13,7 @@ interface ToolState {
   readonly input: unknown;
   readonly item: ThreadItem;
   previousOutput: string;
+  emittedOutputDelta: boolean;
   startedAt: number;
 }
 
@@ -250,6 +251,7 @@ export class TurnStateMachine {
       input,
       item,
       previousOutput: "",
+      emittedOutputDelta: false,
       startedAt: Date.now(),
     });
   }
@@ -297,6 +299,7 @@ export class TurnStateMachine {
 
     if (state.item.type === "commandExecution") {
       state.item.aggregatedOutput = (state.item.aggregatedOutput ?? "") + delta;
+      state.emittedOutputDelta = true;
       await this.sink.notify("item/commandExecution/outputDelta", {
         threadId: this.threadId,
         turnId: this.turn.id,
@@ -364,7 +367,15 @@ export class TurnStateMachine {
       state.item.status = isError ? "failed" : "completed";
     }
 
-    await this.completeItem(state.item.id);
+    await this.completeItem(
+      state.item.id,
+      state.item.type === "commandExecution" && state.emittedOutputDelta
+        ? {
+            ...state.item,
+            aggregatedOutput: null,
+          }
+        : undefined
+    );
     this.toolStates.delete(toolCallId);
   }
 
@@ -402,13 +413,13 @@ export class TurnStateMachine {
     });
   }
 
-  private async completeItem(itemId: string): Promise<void> {
+  private async completeItem(itemId: string, itemOverride?: ThreadItem): Promise<void> {
     const item = this.items.get(itemId);
     if (!item) {
       return;
     }
     await this.sink.notify("item/completed", {
-      item: structuredClone(item),
+      item: structuredClone(itemOverride ?? item),
       threadId: this.threadId,
       turnId: this.turn.id,
     });

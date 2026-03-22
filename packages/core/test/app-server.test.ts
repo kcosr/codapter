@@ -1752,7 +1752,7 @@ describe("AppServerConnection", () => {
           threadId: entry.threadId,
           item: {
             type: "commandExecution",
-            aggregatedOutput: "/repo\n",
+            aggregatedOutput: null,
             status: "completed",
           },
         },
@@ -2389,7 +2389,7 @@ describe("AppServerConnection", () => {
         params: {
           item: {
             type: "commandExecution",
-            aggregatedOutput: "ok",
+            aggregatedOutput: null,
           },
         },
       });

@@ -104,8 +104,66 @@ describe("TurnStateMachine", () => {
     expect(notifications.find((notification) => notification.method === "item/completed")).toEqual(
       expect.objectContaining({
         method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "commandExecution",
+            aggregatedOutput: null,
+          }),
+        }),
       })
     );
+  });
+
+  it("retains command output in the final turn snapshot after suppressing duplicate live completion output", async () => {
+    const { machine } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      input: { command: "pwd" },
+    });
+    await machine.handleEvent({
+      type: "tool_update",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo\n" }] },
+      isCumulative: true,
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "bash",
+      output: { content: [{ type: "text", text: "/repo\n" }] },
+      isError: false,
+    });
+    const turn = await machine.handleEvent({
+      type: "message_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      text: "done",
+    });
+
+    expect(turn).toMatchObject({
+      items: [
+        {
+          type: "commandExecution",
+          aggregatedOutput: "/repo\n",
+          status: "completed",
+        },
+        {
+          type: "agentMessage",
+          text: "done",
+        },
+      ],
+      status: "completed",
+    });
   });
 
   it("hydrates file changes for write tools and emits final output deltas on tool_end", async () => {
