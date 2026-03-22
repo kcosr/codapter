@@ -274,6 +274,17 @@ export class PiBackend implements IBackend {
     });
   }
 
+  async getSessionPath(sessionId: string): Promise<string | null> {
+    this.assertReady();
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      return session.record.sessionFile;
+    }
+
+    const record = await this.requireRecord(sessionId);
+    return record.sessionFile;
+  }
+
   async prompt(
     sessionId: string,
     turnId: string,

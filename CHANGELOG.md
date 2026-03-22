@@ -14,6 +14,10 @@
 
 - Fixed collab sub-agent payloads to keep `spawnAgent` item ids stable across start/completion notifications and propagate sub-agent thread preview/role metadata so the Codex Desktop UI renders created agents correctly.
 - Fixed `scripts/stdio-tap.mjs` to preserve `CODAPTER_DEBUG_LOG_FILE` so debug JSONL logs can be generated when using the tap wrapper.
+- Fixed Pi-backed thread payloads to include the real backend session file path and return collab child threads as `idle` after native `thread/resume`, matching Codex Desktop's native sub-agent reopen flow more closely.
+- Fixed collab tool guidance so Pi-backed agents are not encouraged to close subagents immediately after a successful result, which broke direct follow-up from the child thread in Codex Desktop.
+- Fixed Pi-backed ephemeral helper threads to stay hidden and omit persistent paths, so Codex Desktop no longer switches the main view into internal title-generator conversations.
+- Fixed duplicate text streaming for Pi-backed subagent threads by preventing child-thread turns from subscribing to backend events twice.
 
 ### Removed
 

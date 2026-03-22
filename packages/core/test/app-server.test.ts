@@ -52,6 +52,9 @@ class TestBackend implements IBackend {
     return this.sessionHistories.get(sessionId) ?? [];
   }
   async setSessionName() {}
+  async getSessionPath(sessionId: string) {
+    return `/sessions/${sessionId}.jsonl`;
+  }
 
   async prompt(sessionId: string, turnId: string, text: string) {
     this.activeTurns.set(sessionId, turnId);
@@ -707,6 +710,78 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("starts ephemeral threads as hidden with no persisted path", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+          ephemeral: true,
+        },
+      });
+
+      expect(started).toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            id: expect.any(String),
+            cwd: "/repo",
+            modelProvider: "pi",
+            ephemeral: true,
+            path: null,
+            status: { type: "idle" },
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 3,
+          method: "thread/list",
+          params: {},
+        })
+      ).resolves.toEqual({
+        id: 3,
+        result: {
+          data: [],
+          nextCursor: null,
+        },
+      });
+
+      expect(
+        await threadRegistry.get(
+          (started as { result: { thread: { id: string } } }).result.thread.id
+        )
+      ).toMatchObject({
+        hidden: true,
+        ephemeral: true,
+        path: null,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("spawns collab child threads over the internal UDS and exposes them in thread/list", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
@@ -1096,6 +1171,7 @@ describe("AppServerConnection", () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-native-resume-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
     const prompts: string[] = [];
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
     const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
       prompts.push(text);
       if (text !== "after native resume") {
@@ -1120,6 +1196,9 @@ describe("AppServerConnection", () => {
       backend,
       collabEnabled: true,
       threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
     });
 
     try {
@@ -1196,6 +1275,8 @@ describe("AppServerConnection", () => {
         result: {
           thread: {
             id: childThreadId,
+            status: { type: "idle" },
+            path: expect.stringContaining(".jsonl"),
           },
         },
       });
@@ -1239,6 +1320,23 @@ describe("AppServerConnection", () => {
       });
 
       expect(prompts).toEqual(["initial task", "after native resume"]);
+      expect(
+        notifications.filter(
+          (notification) =>
+            notification.method === "item/agentMessage/delta" &&
+            notification.params?.threadId === childThreadId
+        )
+      ).toEqual([
+        {
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: childThreadId,
+            turnId: expect.any(String),
+            itemId: expect.any(String),
+            delta: "done:after native resume",
+          },
+        },
+      ]);
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();
@@ -1810,6 +1908,57 @@ describe("AppServerConnection", () => {
       });
 
       expect(await threadRegistry.get(started.result.thread.id)).toMatchObject({
+        hidden: true,
+        preview: null,
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("hides legacy title-generator threads with truncated previews from thread/list", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      threadRegistry,
+    });
+
+    try {
+      await threadRegistry.create({
+        threadId: "legacy-title-thread",
+        backendSessionId: "pi_session_legacy",
+        backendType: "pi",
+        cwd: "/repo",
+        modelProvider: "pi",
+        preview:
+          "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a ta",
+      });
+
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 2,
+          method: "thread/list",
+          params: {},
+        })
+      ).resolves.toEqual({
+        id: 2,
+        result: {
+          data: [],
+          nextCursor: null,
+        },
+      });
+
+      expect(await threadRegistry.get("legacy-title-thread")).toMatchObject({
         hidden: true,
         preview: null,
       });

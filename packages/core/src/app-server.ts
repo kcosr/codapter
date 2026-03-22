@@ -121,6 +121,7 @@ const DEFAULT_MODEL_PROVIDER = "pi";
 const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
   "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
 const INTERNAL_TITLE_THREAD_PROMPT_MARKER = "Generate a concise UI title";
+const INTERNAL_TITLE_THREAD_PREVIEW_PREFIX = INTERNAL_TITLE_THREAD_PROMPT_PREFIX.slice(0, 120);
 
 export interface AppServerIdentity {
   readonly userAgent: string;
@@ -407,7 +408,11 @@ function isInternalTitlePrompt(text: string): boolean {
 }
 
 function isInternalTitlePreview(preview: string | null): boolean {
-  return preview?.trim().startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ?? false;
+  const normalized = preview?.trim() ?? "";
+  return (
+    normalized.startsWith(INTERNAL_TITLE_THREAD_PROMPT_PREFIX) ||
+    normalized.startsWith(INTERNAL_TITLE_THREAD_PREVIEW_PREFIX)
+  );
 }
 
 function toJsonValueArray(value: unknown): JsonValue[] {
@@ -1532,6 +1537,8 @@ export class AppServerConnection {
     await this.collabReady;
     const threadId = randomUUID();
     const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
+    const sessionPath = await backend.getSessionPath(sessionId);
+    const ephemeral = parsed.ephemeral ?? false;
     if (parsed.model) {
       await backend.setModel(sessionId, parsed.model);
     }
@@ -1539,6 +1546,9 @@ export class AppServerConnection {
       threadId,
       backendSessionId: sessionId,
       backendType: "pi",
+      ephemeral,
+      hidden: ephemeral,
+      path: ephemeral ? null : sessionPath,
       cwd: parsed.cwd ?? process.cwd(),
       preview: "",
       modelProvider: parsed.modelProvider ?? DEFAULT_MODEL_PROVIDER,
@@ -1564,7 +1574,7 @@ export class AppServerConnection {
   private async handleThreadResume(params: unknown): Promise<ThreadResumeResponse> {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
-    const entry = await this.getThreadEntry(parsed.threadId);
+    let entry = await this.getThreadEntry(parsed.threadId);
     const collabAgent = isSubAgentThreadSource(entry.source)
       ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
       : null;
@@ -1577,6 +1587,11 @@ export class AppServerConnection {
       }
       if (parsed.model) {
         await backend.setModel(existing.sessionId, parsed.model);
+      }
+      const sessionPath = await backend.getSessionPath(existing.sessionId);
+      const resolvedPath = entry.ephemeral ? null : sessionPath;
+      if (entry.path !== resolvedPath) {
+        entry = await this.threadRegistry.update(parsed.threadId, { path: resolvedPath });
       }
       const history = await backend.readSessionHistory(existing.sessionId);
       const turns = buildTurns(history, entry.cwd ?? process.cwd());
@@ -1611,14 +1626,21 @@ export class AppServerConnection {
       if (parsed.model) {
         await backend.setModel(sessionId, parsed.model);
       }
+      const sessionPath = await backend.getSessionPath(sessionId);
       runtime.sessionId = sessionId;
       if (isSubAgentThreadSource(entry.source)) {
         this.collabManager?.syncExternalResume(parsed.threadId, sessionId);
       }
+      if (entry.backendSessionId !== sessionId || entry.path !== sessionPath) {
+        entry = await this.threadRegistry.update(parsed.threadId, {
+          backendSessionId: sessionId,
+          path: entry.ephemeral ? null : sessionPath,
+        });
+      }
 
       const history = await backend.readSessionHistory(sessionId);
-      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       this.transitionToReady(parsed.threadId, runtime);
+      const thread = this.buildThread(entry, buildTurns(history, entry.cwd ?? process.cwd()));
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1658,6 +1680,8 @@ export class AppServerConnection {
         sourceEntry.backendSessionId,
         this.createBackendSessionLaunchConfig(forkThreadId)
       );
+      const sessionPath = await backend.getSessionPath(sessionId);
+      const ephemeral = parsed.ephemeral ?? false;
       if (parsed.model) {
         await backend.setModel(sessionId, parsed.model);
       }
@@ -1665,6 +1689,9 @@ export class AppServerConnection {
         threadId: forkThreadId,
         backendSessionId: sessionId,
         backendType: sourceEntry.backendType,
+        ephemeral,
+        hidden: ephemeral,
+        path: ephemeral ? null : sessionPath,
         cwd: parsed.cwd ?? sourceEntry.cwd,
         preview: sourceEntry.preview,
         modelProvider: parsed.modelProvider ?? sourceEntry.modelProvider,
@@ -1902,11 +1929,13 @@ export class AppServerConnection {
     runtime.latestTurnId = turnId;
     runtime.machine = machine;
     runtime.subscription?.dispose();
-    runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
-      this.enqueueBackendEvent(parsed.threadId, turnId, event);
-    });
     if (isSubAgentThreadSource(entry.source)) {
+      runtime.subscription = null;
       this.collabManager?.syncExternalTurnStart(parsed.threadId, turnId);
+    } else {
+      runtime.subscription = backend.onEvent(runtime.sessionId, (event) => {
+        this.enqueueBackendEvent(parsed.threadId, turnId, event);
+      });
     }
 
     await this.publishThreadStatus(parsed.threadId);
@@ -2211,12 +2240,12 @@ export class AppServerConnection {
     return {
       id: entry.threadId,
       preview: entry.preview ?? "",
-      ephemeral: false,
+      ephemeral: entry.ephemeral,
       modelProvider: entry.modelProvider ?? DEFAULT_MODEL_PROVIDER,
       createdAt: toUnixSeconds(entry.createdAt),
       updatedAt: toUnixSeconds(entry.updatedAt),
       status: runtimeToThreadStatus(this.threadRuntimes.get(entry.threadId)),
-      path: null,
+      path: entry.path,
       cwd: entry.cwd ?? process.cwd(),
       cliVersion: ADAPTER_VERSION,
       source: "type" in entry.source ? "appServer" : entry.source,
@@ -2376,10 +2405,12 @@ export class AppServerConnection {
 
   private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {
     const parentEntry = await this.getThreadEntry(input.parentThreadId);
+    const path = this.backend ? await this.backend.getSessionPath(input.sessionId) : null;
     const entry = await this.threadRegistry.create({
       threadId: input.threadId,
       backendSessionId: input.sessionId,
       backendType: "pi",
+      path,
       cwd: parentEntry.cwd ?? process.cwd(),
       preview: input.preview,
       modelProvider: parentEntry.modelProvider ?? DEFAULT_MODEL_PROVIDER,

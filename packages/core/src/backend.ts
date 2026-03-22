@@ -16,6 +16,7 @@ export interface BackendMessage {
 export interface BackendSessionSummary {
   readonly sessionId: string;
   readonly name: string | null;
+  readonly path: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -166,6 +167,9 @@ export interface IBackend {
 
   /** Persist a human-readable name for a backend session. */
   setSessionName(sessionId: string, name: string): Promise<void>;
+
+  /** Return the persisted transcript path for a backend session, if any. */
+  getSessionPath(sessionId: string): Promise<string | null>;
 
   /** Submit a user prompt to the backend for the current turn. */
   prompt(

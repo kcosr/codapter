@@ -37,6 +37,7 @@ describe("ThreadRegistry", () => {
       backendSessionId: "session_1",
       backendType: "pi",
       hidden: false,
+      path: null,
       cwd: "/repo",
       preview: "hello",
       archived: false,
@@ -45,12 +46,14 @@ describe("ThreadRegistry", () => {
     const updated = await registry.update(created.threadId, {
       archived: true,
       name: "Renamed",
+      path: "/sessions/session_1.jsonl",
       modelProvider: "openai",
       gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });
     expect(updated).toMatchObject({
       archived: true,
       name: "Renamed",
+      path: "/sessions/session_1.jsonl",
       modelProvider: "openai",
       gitInfo: { sha: "abc", branch: "main", originUrl: null },
     });

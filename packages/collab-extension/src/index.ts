@@ -29,6 +29,8 @@ Spawn a sub-agent for a well-scoped task. Returns metadata for exactly one spawn
 - Do not redo delegated subagent tasks yourself; focus on integrating results or tackling non-overlapping work.
 - While the subagent is running, do meaningful non-overlapping work immediately.
 - Do not repeatedly wait by reflex.
+- After a subagent finishes successfully, prefer leaving it available for likely follow-up work instead of closing it immediately.
+- Only close a subagent when the user explicitly asks to close it, or when you are confident the work is fully done and the agent is unlikely to be reused.
 
 ### Parallel delegation patterns
 - Run multiple independent subtasks in parallel when you have distinct questions.
@@ -357,7 +359,7 @@ export default async function collabExtension(pi: ExtensionApi): Promise<void> {
     name: "close_agent",
     label: "Close Agent",
     description:
-      "Close an agent when it is no longer needed and return its previous status before shutdown was requested. Don't keep agents open for too long if they are not needed anymore.",
+      "Close an agent when it is no longer needed and return its previous status before shutdown was requested. Prefer leaving recently used agents open for likely follow-up work. Use this mainly when the user explicitly wants the agent closed or you are confident it will not be reused.",
     parameters: CloseAgentParams,
     execute: (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) =>
       collabCall("collab/close", params, FAST_TIMEOUT_MS, signal),

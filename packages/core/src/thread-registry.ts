@@ -14,8 +14,10 @@ export interface ThreadRegistryEntry {
   readonly threadId: string;
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly ephemeral: boolean;
   readonly hidden: boolean;
   readonly name: string | null;
+  readonly path: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly archived: boolean;
@@ -32,8 +34,10 @@ export interface CreateThreadRegistryEntry {
   readonly threadId?: string;
   readonly backendSessionId: string;
   readonly backendType: string;
+  readonly ephemeral?: boolean;
   readonly hidden?: boolean;
   readonly name?: string | null;
+  readonly path?: string | null;
   readonly archived?: boolean;
   readonly cwd?: string | null;
   readonly preview?: string | null;
@@ -47,8 +51,10 @@ export interface CreateThreadRegistryEntry {
 export interface UpdateThreadRegistryEntry {
   readonly backendSessionId?: string;
   readonly backendType?: string;
+  readonly ephemeral?: boolean;
   readonly hidden?: boolean;
   readonly name?: string | null;
+  readonly path?: string | null;
   readonly updatedAt?: string;
   readonly archived?: boolean;
   readonly cwd?: string | null;
@@ -111,8 +117,10 @@ function isThreadRegistryEntry(value: unknown): value is ThreadRegistryEntry {
     typeof value.threadId === "string" &&
     typeof value.backendSessionId === "string" &&
     typeof value.backendType === "string" &&
+    (typeof value.ephemeral === "boolean" || value.ephemeral === undefined) &&
     (typeof value.hidden === "boolean" || value.hidden === undefined) &&
     (typeof value.name === "string" || value.name === null) &&
+    (typeof value.path === "string" || value.path === null || value.path === undefined) &&
     typeof value.createdAt === "string" &&
     typeof value.updatedAt === "string" &&
     typeof value.archived === "boolean" &&
@@ -191,7 +199,9 @@ export class ThreadRegistry {
       const rawSource = (entry as { source?: unknown }).source;
       this.entries.set(entry.threadId, {
         ...entry,
+        ephemeral: entry.ephemeral ?? false,
         hidden: entry.hidden ?? false,
+        path: entry.path ?? null,
         source:
           rawSource === "appServer" || rawSource === undefined || rawSource === null
             ? { type: "appServer" }
@@ -224,8 +234,10 @@ export class ThreadRegistry {
       threadId: input.threadId ?? randomUUID(),
       backendSessionId: input.backendSessionId,
       backendType: input.backendType,
+      ephemeral: input.ephemeral ?? false,
       hidden: input.hidden ?? false,
       name: input.name ?? null,
+      path: input.path ?? null,
       createdAt: now,
       updatedAt: now,
       archived: input.archived ?? false,

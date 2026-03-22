@@ -34,6 +34,9 @@ class TestBackend implements IBackend {
     return [];
   }
   async setSessionName() {}
+  async getSessionPath(sessionId: string) {
+    return `/sessions/${sessionId}.jsonl`;
+  }
   async prompt(sessionId: string, turnId: string, text: string) {
     this.prompts.push({ sessionId, turnId, text });
   }
