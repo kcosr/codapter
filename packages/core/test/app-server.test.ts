@@ -1051,10 +1051,15 @@ describe("AppServerConnection", () => {
           notification.params?.thread &&
           notification.params.thread.id !== started.result.thread.id
       );
+      const childThreadId =
+        childStarted && typeof childStarted.params?.thread?.id === "string"
+          ? childStarted.params.thread.id
+          : "";
       expect(childStarted).toMatchObject({
         method: "thread/started",
         params: {
           thread: {
+            id: expect.any(String),
             preview: "review this",
             source: {
               subAgent: {
@@ -1067,6 +1072,26 @@ describe("AppServerConnection", () => {
           },
         },
       });
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/started" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.item?.type === "userMessage" &&
+            Array.isArray(notification.params.item.content) &&
+            notification.params.item.content[0]?.text === "review this"
+        )
+      ).toBeTruthy();
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.item?.type === "userMessage" &&
+            Array.isArray(notification.params.item.content) &&
+            notification.params.item.content[0]?.text === "review this"
+        )
+      ).toBeTruthy();
 
       const listed = (await connection.handleMessage({
         id: 4,
@@ -1127,6 +1152,14 @@ describe("AppServerConnection", () => {
             notification.method === "item/completed" &&
             notification.params?.item?.type === "collabAgentToolCall" &&
             notification.params.item.tool === "wait"
+        )
+      ).toBeTruthy();
+      expect(
+        notifications.find(
+          (notification) =>
+            notification.method === "turn/completed" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.turn?.status === "completed"
         )
       ).toBeTruthy();
     } finally {

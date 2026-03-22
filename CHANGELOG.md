@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed Pi-backed forked sub-agent turns to emit their live user prompt and keep the active child turn alive until the final `message_end`, so Codex Desktop no longer reorders the child prompt above follow-up output or leaves the child thread stuck showing Thinking.
 - Fixed Pi-backed `write`/`edit` tool rendering to synthesize structured file-change items and final output deltas, so Codex Desktop shows created/edited files in the chat UI instead of dropping or emptying those tool results.
 - Fixed Pi-backed thread resume to preserve the loaded live turn id for the latest turn, so reopening a sub-agent thread no longer duplicates the assistant reply above the hydrated user/assistant turn.
 - Fixed Pi-backed sub-agent thread hydration so reopening a live child thread keeps the active user prompt and assistant/tool bubbles in the correct order instead of splitting the same prompt across duplicated turns.

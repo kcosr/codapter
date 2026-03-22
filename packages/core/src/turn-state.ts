@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
-import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
+import type { JsonValue, ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
 import { classifyToolName, synthesizeFileChanges } from "./tool-items.js";
 
 export interface TurnStateNotificationSink {
@@ -107,6 +107,20 @@ export class TurnStateMachine {
       threadId: this.threadId,
       turn: this.snapshot,
     });
+  }
+
+  async emitUserMessage(content: JsonValue[]): Promise<void> {
+    if (this.turn.items.some((item) => item.type === "userMessage")) {
+      return;
+    }
+
+    const item: ThreadItem = {
+      type: "userMessage",
+      id: `${this.turn.id}_user`,
+      content: structuredClone(content),
+    };
+    await this.storeItem(item);
+    await this.completeItem(item.id);
   }
 
   async handleEvent(event: BackendEvent): Promise<Turn | null> {

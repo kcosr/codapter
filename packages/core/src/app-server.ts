@@ -2366,7 +2366,12 @@ export class AppServerConnection {
 
     runtime.sessionId = agent.sessionId;
 
-    if (agent.status === "completed" || agent.status === "errored" || agent.status === "shutdown") {
+    // Let the queued child message_end finish the live turn before tearing the machine down.
+    if (
+      (agent.status === "completed" && (!runtime.machine || !runtime.activeTurnId)) ||
+      agent.status === "errored" ||
+      agent.status === "shutdown"
+    ) {
       runtime.machine = null;
       runtime.activeTurnId = null;
       runtime.activeTurnInput = null;
@@ -2687,6 +2692,7 @@ export class AppServerConnection {
     runtime.machine = machine;
     await this.publishThreadStatus(agent.threadId);
     await machine.emitStarted();
+    await machine.emitUserMessage(activeTurnInput);
     return turnId;
   }
 }
