@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../src/app-server.js";
 import type { BackendEvent, BackendMessage, IBackend } from "../src/backend.js";
+import { InMemoryConfigStore } from "../src/config-store.js";
 import { ThreadRegistry } from "../src/thread-registry.js";
 
 class TestBackend implements IBackend {
@@ -17,6 +18,7 @@ class TestBackend implements IBackend {
     requestId: string;
     response: unknown;
   }> = [];
+  public readonly setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
 
   constructor(
     private readonly onPromptCallback?: (args: {
@@ -95,7 +97,9 @@ class TestBackend implements IBackend {
     ];
   }
 
-  async setModel() {}
+  async setModel(sessionId: string, modelId: string) {
+    this.setModelCalls.push({ sessionId, modelId });
+  }
 
   async getCapabilities() {
     return {
@@ -432,6 +436,198 @@ describe("AppServerConnection", () => {
         ],
       },
     });
+  });
+
+  it("uses persisted config model for thread start and resume when request model is omitted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-config-"));
+    const configPath = join(directory, "config.toml");
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const configStore = new InMemoryConfigStore(configPath);
+    configStore.writeBatch({
+      edits: [
+        {
+          keyPath: "model",
+          value: "openai-codex/gpt-5.4",
+          mergeStrategy: "upsert",
+        },
+        {
+          keyPath: "model_reasoning_effort",
+          value: "medium",
+          mergeStrategy: "upsert",
+        },
+      ],
+      filePath: null,
+      expectedVersion: null,
+    });
+
+    const backend = new TestBackend();
+    const firstConnection = new AppServerConnection({
+      backend,
+      configStore,
+      threadRegistry,
+    });
+
+    try {
+      await firstConnection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await firstConnection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          cwd: "/tmp",
+          approvalPolicy: "on-request",
+          sandbox: "workspace-write",
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        },
+      })) as { id: number; result: ThreadStartResponse };
+
+      expect(started.result.model).toBe("openai-codex/gpt-5.4");
+      expect(started.result.reasoningEffort).toBe("medium");
+      expect(backend.setModelCalls).toContainEqual({
+        sessionId: "session_1",
+        modelId: "openai-codex/gpt-5.4",
+      });
+
+      await firstConnection.dispose();
+
+      const resumedBackend = new TestBackend();
+      const resumedConnection = new AppServerConnection({
+        backend: resumedBackend,
+        configStore: new InMemoryConfigStore(configPath),
+        threadRegistry,
+      });
+
+      try {
+        await resumedConnection.handleMessage({
+          id: 3,
+          method: "initialize",
+          params: {
+            clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+            capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+          },
+        });
+
+        const resumed = (await resumedConnection.handleMessage({
+          id: 4,
+          method: "thread/resume",
+          params: {
+            threadId: started.result.thread.id,
+            history: null,
+            path: started.result.thread.path,
+            model: null,
+            modelProvider: null,
+            serviceTier: null,
+            cwd: "/tmp",
+            approvalPolicy: "on-request",
+            sandbox: "workspace-write",
+            config: {},
+            baseInstructions: null,
+            developerInstructions: null,
+            personality: null,
+            persistExtendedHistory: false,
+          },
+        })) as { id: number; result: ThreadResumeResponse };
+
+        expect(resumed.result.model).toBe("openai-codex/gpt-5.4");
+        expect(resumed.result.reasoningEffort).toBe("medium");
+        expect(resumedBackend.setModelCalls).toContainEqual({
+          sessionId: "session_1",
+          modelId: "openai-codex/gpt-5.4",
+        });
+      } finally {
+        await resumedConnection.dispose();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses collaborationMode.settings.model for turn/start when model is omitted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-turn-model-"));
+    const backend = new TestBackend();
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry: new ThreadRegistry(join(directory, "threads.json")),
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          model: "anthropic/claude-opus-4-6",
+          cwd: "/tmp",
+          approvalPolicy: "on-request",
+          sandbox: "workspace-write",
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        },
+      })) as { id: number; result: ThreadStartResponse };
+
+      expect(started.result.thread.id).toEqual(expect.any(String));
+
+      backend.setModelCalls.length = 0;
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "what model are you" }],
+          cwd: "/tmp",
+          approvalPolicy: "on-request",
+          approvalsReviewer: "user",
+          sandboxPolicy: {
+            type: "workspaceWrite",
+            writableRoots: ["/tmp"],
+            readOnlyAccess: { type: "fullAccess" },
+            networkAccess: false,
+            excludeSlashTmp: false,
+            excludeTmpdirEnvVar: false,
+          },
+          model: null,
+          serviceTier: null,
+          effort: null,
+          summary: "none",
+          personality: "friendly",
+          outputSchema: null,
+          collaborationMode: {
+            mode: "default",
+            settings: {
+              model: "openai-codex/gpt-5.4",
+              reasoning_effort: "medium",
+            },
+          },
+        },
+      });
+
+      expect(backend.setModelCalls).toEqual([
+        {
+          sessionId: "session_1",
+          modelId: "openai-codex/gpt-5.4",
+        },
+      ]);
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("returns model/list data from the backend", async () => {

@@ -20,6 +20,8 @@
 - Fixed Pi-backed ephemeral helper threads to stay hidden and omit persistent paths, so Codex Desktop no longer switches the main view into internal title-generator conversations.
 - Fixed duplicate text streaming for Pi-backed subagent threads by preventing child-thread turns from subscribing to backend events twice.
 - Fixed `wait_agent` tool results to include sub-agent completion messages, so parent agents can read the child output instead of guessing or claiming it was missing.
+- Fixed Pi-backed live model switching so `turn/start` honors the GUI-selected model even when the desktop app omits `params.model` and only sends the selection through collaboration/config state.
+- Fixed the Codapter config store to persist selected model and reasoning effort to disk, so the Codex Desktop picker survives restart and resumed Pi threads inherit the configured model.
 
 ### Removed
 

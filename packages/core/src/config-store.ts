@@ -1,5 +1,6 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type {
   Config,
   ConfigBatchWriteParams,
@@ -89,13 +90,136 @@ function applyEdit(config: Config, edit: ConfigEdit | ConfigValueWriteParams): v
   cursor[finalSegment] = edit.value;
 }
 
+function setConfigValue(config: Config, keyPath: string, value: JsonValue): void {
+  applyEdit(config, {
+    keyPath,
+    value,
+    mergeStrategy: "replace",
+  });
+}
+
+function parseTomlScalar(raw: string): JsonValue | undefined {
+  const value = raw.trim();
+  if (!value) {
+    return undefined;
+  }
+
+  if (value.startsWith('"') && value.endsWith('"')) {
+    return value
+      .slice(1, -1)
+      .replace(/\\\\/g, "\\")
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, "\n")
+      .replace(/\\r/g, "\r")
+      .replace(/\\t/g, "\t");
+  }
+
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+
+  if (/^-?\d+(\.\d+)?$/.test(value)) {
+    return Number(value);
+  }
+
+  if (value.startsWith("[") && value.endsWith("]")) {
+    const inner = value.slice(1, -1).trim();
+    if (!inner) {
+      return [];
+    }
+    return inner
+      .split(",")
+      .map((entry) => parseTomlScalar(entry))
+      .filter((entry): entry is JsonValue => entry !== undefined);
+  }
+
+  return undefined;
+}
+
+function loadConfigFromDisk(filePath: string): Config {
+  const config = createDefaultConfig();
+  if (!existsSync(filePath)) {
+    return config;
+  }
+
+  const raw = readFileSync(filePath, "utf8");
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    const separator = trimmed.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const keyPath = trimmed.slice(0, separator).trim();
+    const value = parseTomlScalar(trimmed.slice(separator + 1));
+    if (!keyPath || value === undefined) {
+      continue;
+    }
+
+    setConfigValue(config, keyPath, value);
+  }
+
+  return config;
+}
+
+function escapeTomlString(value: string): string {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+function formatTomlValue(value: JsonValue): string | null {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "string") {
+    return `"${escapeTomlString(value)}"`;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    const formatted = value
+      .map((entry) => formatTomlValue(entry))
+      .filter((entry): entry is string => entry !== null);
+    return `[${formatted.join(", ")}]`;
+  }
+  return null;
+}
+
+function collectTomlLines(value: JsonValue | undefined, keyPath = ""): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (Array.isArray(value) || typeof value !== "object") {
+    const formatted = formatTomlValue(value);
+    return keyPath && formatted ? [`${keyPath} = ${formatted}`] : [];
+  }
+
+  return Object.entries(value).flatMap(([key, child]) =>
+    collectTomlLines(child, keyPath ? `${keyPath}.${key}` : key)
+  );
+}
+
 export class InMemoryConfigStore {
   private readonly filePath: string;
   private versionCounter = 1;
-  private readonly config: Config = createDefaultConfig();
+  private readonly config: Config;
 
   constructor(filePath = resolve(homedir(), ".config", "codapter", "config.toml")) {
     this.filePath = filePath;
+    this.config = loadConfigFromDisk(filePath);
   }
 
   read(params: ConfigReadParams): ConfigReadResponse {
@@ -121,6 +245,7 @@ export class InMemoryConfigStore {
   writeValue(params: ConfigValueWriteParams): ConfigWriteResponse {
     this.assertVersion(params.expectedVersion ?? null);
     applyEdit(this.config, params);
+    this.persist();
     this.versionCounter += 1;
     return this.createWriteResponse("ok");
   }
@@ -130,6 +255,7 @@ export class InMemoryConfigStore {
     for (const edit of params.edits) {
       applyEdit(this.config, edit);
     }
+    this.persist();
     this.versionCounter += 1;
     return this.createWriteResponse("ok");
   }
@@ -151,5 +277,12 @@ export class InMemoryConfigStore {
       filePath: this.filePath,
       overriddenMetadata: null,
     };
+  }
+
+  private persist(): void {
+    mkdirSync(dirname(this.filePath), { recursive: true });
+    const lines = collectTomlLines(this.config);
+    const output = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+    writeFileSync(this.filePath, output, "utf8");
   }
 }

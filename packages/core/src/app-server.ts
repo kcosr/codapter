@@ -218,6 +218,25 @@ function readEmulatedIdentityFromToml(): string | null {
   return match?.[1] ?? null;
 }
 
+function readStringRecordValue(record: unknown, key: string): string | null {
+  if (typeof record !== "object" || record === null) {
+    return null;
+  }
+  const value = (record as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
+
+function resolveCollaborationModeSetting(
+  collaborationMode: JsonValue | null | undefined,
+  key: string
+): string | null {
+  if (typeof collaborationMode !== "object" || collaborationMode === null) {
+    return null;
+  }
+  const settings = (collaborationMode as Record<string, unknown>).settings;
+  return readStringRecordValue(settings, key);
+}
+
 function createIdentity(): AppServerIdentity {
   const userAgent =
     process.env.CODAPTER_EMULATE_CODEX_IDENTITY ??
@@ -1330,6 +1349,34 @@ export class AppServerConnection {
     return this.configStore.writeBatch(params as ConfigBatchWriteParams);
   }
 
+  private readEffectiveConfig(cwd: string | null): ConfigReadResponse["config"] {
+    return this.configStore.read({ includeLayers: false, cwd }).config;
+  }
+
+  private resolveRequestedModel(
+    cwd: string | null,
+    requestedModel: string | null | undefined,
+    collaborationMode?: JsonValue | null
+  ): string | null {
+    return (
+      requestedModel ??
+      resolveCollaborationModeSetting(collaborationMode, "model") ??
+      this.readEffectiveConfig(cwd).model
+    );
+  }
+
+  private resolveRequestedReasoningEffort(
+    cwd: string | null,
+    requestedEffort: string | null | undefined,
+    collaborationMode?: JsonValue | null
+  ): string | null {
+    return (
+      requestedEffort ??
+      resolveCollaborationModeSetting(collaborationMode, "reasoning_effort") ??
+      this.readEffectiveConfig(cwd).model_reasoning_effort
+    );
+  }
+
   private handleConfigRequirementsRead(): ConfigRequirementsReadResponse {
     return { requirements: null };
   }
@@ -1539,8 +1586,13 @@ export class AppServerConnection {
     const sessionId = await backend.createSession(this.createBackendSessionLaunchConfig(threadId));
     const sessionPath = await backend.getSessionPath(sessionId);
     const ephemeral = parsed.ephemeral ?? false;
-    if (parsed.model) {
-      await backend.setModel(sessionId, parsed.model);
+    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? null, parsed.model);
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? null,
+      parsed.config?.model_reasoning_effort as string | null | undefined
+    );
+    if (effectiveModel) {
+      await backend.setModel(sessionId, effectiveModel);
     }
     const entry = await this.threadRegistry.create({
       threadId,
@@ -1563,11 +1615,12 @@ export class AppServerConnection {
     await this.publishThreadStatus(entry.threadId);
     return await this.buildThreadExecutionResponse(
       thread,
-      parsed.model ?? null,
+      effectiveModel,
       parsed.cwd ?? null,
       parsed.approvalPolicy ?? null,
       parsed.approvalsReviewer ?? null,
-      parsed.sandbox ?? null
+      parsed.sandbox ?? null,
+      effectiveReasoningEffort
     );
   }
 
@@ -1575,6 +1628,11 @@ export class AppServerConnection {
     const backend = this.requireBackend();
     const parsed = params as ThreadResumeParams;
     let entry = await this.getThreadEntry(parsed.threadId);
+    const effectiveModel = this.resolveRequestedModel(parsed.cwd ?? entry.cwd, parsed.model);
+    const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+      parsed.cwd ?? entry.cwd,
+      parsed.config?.model_reasoning_effort as string | null | undefined
+    );
     const collabAgent = isSubAgentThreadSource(entry.source)
       ? (this.collabManager?.getAgentByThreadId(parsed.threadId) ?? null)
       : null;
@@ -1585,8 +1643,8 @@ export class AppServerConnection {
       if (existing.status === "starting" && existing.readyPromise) {
         await existing.readyPromise;
       }
-      if (parsed.model) {
-        await backend.setModel(existing.sessionId, parsed.model);
+      if (effectiveModel) {
+        await backend.setModel(existing.sessionId, effectiveModel);
       }
       const sessionPath = await backend.getSessionPath(existing.sessionId);
       const resolvedPath = entry.ephemeral ? null : sessionPath;
@@ -1601,11 +1659,12 @@ export class AppServerConnection {
       const thread = this.buildThread(entry, turns);
       return await this.buildThreadExecutionResponse(
         thread,
-        parsed.model ?? null,
+        effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
       );
     }
 
@@ -1623,8 +1682,8 @@ export class AppServerConnection {
         entry.backendSessionId,
         this.createBackendSessionLaunchConfig(parsed.threadId)
       );
-      if (parsed.model) {
-        await backend.setModel(sessionId, parsed.model);
+      if (effectiveModel) {
+        await backend.setModel(sessionId, effectiveModel);
       }
       const sessionPath = await backend.getSessionPath(sessionId);
       runtime.sessionId = sessionId;
@@ -1644,11 +1703,12 @@ export class AppServerConnection {
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
-        parsed.model ?? null,
+        effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
       );
     } catch (error) {
       runtime.status = "terminating";
@@ -1676,14 +1736,22 @@ export class AppServerConnection {
     try {
       forkThreadId = randomUUID();
       await this.collabReady;
+      const effectiveModel = this.resolveRequestedModel(
+        parsed.cwd ?? sourceEntry.cwd,
+        parsed.model
+      );
+      const effectiveReasoningEffort = this.resolveRequestedReasoningEffort(
+        parsed.cwd ?? sourceEntry.cwd,
+        parsed.config?.model_reasoning_effort as string | null | undefined
+      );
       const sessionId = await backend.forkSession(
         sourceEntry.backendSessionId,
         this.createBackendSessionLaunchConfig(forkThreadId)
       );
       const sessionPath = await backend.getSessionPath(sessionId);
       const ephemeral = parsed.ephemeral ?? false;
-      if (parsed.model) {
-        await backend.setModel(sessionId, parsed.model);
+      if (effectiveModel) {
+        await backend.setModel(sessionId, effectiveModel);
       }
       const entry = await this.threadRegistry.create({
         threadId: forkThreadId,
@@ -1708,11 +1776,12 @@ export class AppServerConnection {
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
-        parsed.model ?? null,
+        effectiveModel,
         parsed.cwd ?? null,
         parsed.approvalPolicy ?? null,
         parsed.approvalsReviewer ?? null,
-        parsed.sandbox ?? null
+        parsed.sandbox ?? null,
+        effectiveReasoningEffort
       );
     } catch (error) {
       if (forkThreadId) {
@@ -1893,8 +1962,13 @@ export class AppServerConnection {
     const runtime = await this.getReadyThreadRuntime(parsed.threadId);
     let entry = await this.getThreadEntry(parsed.threadId);
     const { text, images, preview } = this.normalizeUserInputs(parsed.input);
-    if (parsed.model) {
-      await backend.setModel(runtime.sessionId, parsed.model);
+    const effectiveModel = this.resolveRequestedModel(
+      parsed.cwd ?? entry.cwd,
+      parsed.model,
+      parsed.collaborationMode ?? null
+    );
+    if (effectiveModel) {
+      await backend.setModel(runtime.sessionId, effectiveModel);
     }
     const threadPatch: {
       hidden?: boolean;
@@ -2263,7 +2337,8 @@ export class AppServerConnection {
     requestedCwd: string | null,
     requestedApprovalPolicy: string | null,
     requestedApprovalsReviewer: string | null,
-    requestedSandboxMode: SandboxMode | null
+    requestedSandboxMode: SandboxMode | null,
+    requestedReasoningEffort: string | null
   ): Promise<ThreadStartResponse> {
     const models = this.backend ? await this.backend.listModels() : [];
     const defaultModel = models.find((model) => model.isDefault) ?? models[0];
@@ -2278,7 +2353,7 @@ export class AppServerConnection {
       approvalPolicy: requestedApprovalPolicy ?? DEFAULT_APPROVAL_POLICY,
       approvalsReviewer: requestedApprovalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
       sandbox: buildSandboxPolicy(requestedSandboxMode, cwd),
-      reasoningEffort: defaultModel?.defaultReasoningEffort ?? null,
+      reasoningEffort: requestedReasoningEffort ?? defaultModel?.defaultReasoningEffort ?? null,
     };
   }
 
