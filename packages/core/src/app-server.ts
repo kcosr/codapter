@@ -106,6 +106,7 @@ import {
   type ThreadRegistryEntry,
   type ThreadRegistryLogger,
 } from "./thread-registry.js";
+import { classifyToolName, synthesizeFileChanges } from "./tool-items.js";
 import { TurnStateMachine, toThreadTokenUsage } from "./turn-state.js";
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
@@ -464,13 +465,7 @@ function commandFromToolArguments(input: unknown): string {
 }
 
 function toolKindFromName(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
+  return classifyToolName(toolName);
 }
 
 function thinkingSummaryFromSignature(signature: string): string | null {
@@ -538,7 +533,7 @@ function finalizeHistoricalToolItem(item: ThreadItem): void {
 function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
   const turns: Turn[] = [];
   let currentTurn: Turn | null = null;
-  let pendingTools = new Map<string, ThreadItem>();
+  let pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
 
   const ensureTurn = (id: string) => {
     if (currentTurn) {
@@ -551,16 +546,16 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       error: null,
     };
     turns.push(currentTurn);
-    pendingTools = new Map<string, ThreadItem>();
+    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
     return currentTurn;
   };
 
   const finalizeTurn = () => {
-    for (const item of pendingTools.values()) {
-      finalizeHistoricalToolItem(item);
+    for (const pending of pendingTools.values()) {
+      finalizeHistoricalToolItem(pending.item);
     }
     currentTurn = null;
-    pendingTools = new Map<string, ThreadItem>();
+    pendingTools = new Map<string, { item: ThreadItem; toolName: string; input: unknown }>();
   };
 
   for (const message of history) {
@@ -630,7 +625,7 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
                 ? {
                     type: "fileChange",
                     id: `${message.id}_tool_${index}`,
-                    changes: [],
+                    changes: synthesizeFileChanges(toolName, cwd, block.arguments),
                     status: "inProgress",
                   }
                 : {
@@ -640,7 +635,11 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
                     phase: null,
                   };
           turn.items.push(item);
-          pendingTools.set(toolCallId, item);
+          pendingTools.set(toolCallId, {
+            item,
+            toolName,
+            input: block.arguments,
+          });
           continue;
         }
 
@@ -668,18 +667,19 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       const blocks = toJsonValueArray(record.content);
       const outputText = textContentFromBlocks(blocks);
       const isError = Boolean(record.isError);
-      const existingItem = pendingTools.get(toolCallId);
-      if (existingItem) {
-        if (existingItem.type === "commandExecution") {
-          existingItem.aggregatedOutput = outputText || existingItem.aggregatedOutput;
-          existingItem.status = isError ? "failed" : "completed";
-          existingItem.exitCode = isError ? 1 : 0;
-          existingItem.durationMs = existingItem.durationMs ?? 0;
-        } else if (existingItem.type === "fileChange") {
-          existingItem.changes = blocks;
-          existingItem.status = isError ? "failed" : "completed";
-        } else if (existingItem.type === "agentMessage") {
-          existingItem.text = outputText;
+      const pending = pendingTools.get(toolCallId);
+      if (pending) {
+        if (pending.item.type === "commandExecution") {
+          pending.item.aggregatedOutput = outputText || pending.item.aggregatedOutput;
+          pending.item.status = isError ? "failed" : "completed";
+          pending.item.exitCode = isError ? 1 : 0;
+          pending.item.durationMs = pending.item.durationMs ?? 0;
+        } else if (pending.item.type === "fileChange") {
+          const changes = synthesizeFileChanges(toolName, cwd, pending.input, record);
+          pending.item.changes = changes.length > 0 ? changes : blocks;
+          pending.item.status = isError ? "failed" : "completed";
+        } else if (pending.item.type === "agentMessage") {
+          pending.item.text = outputText;
         }
         pendingTools.delete(toolCallId);
         continue;
@@ -703,10 +703,11 @@ function buildTurns(history: readonly BackendMessage[], cwd: string): Turn[] {
       }
 
       if (toolKind === "fileChange") {
+        const changes = synthesizeFileChanges(toolName, cwd, record, record);
         turn.items.push({
           type: "fileChange",
           id: `${message.id}_toolResult`,
-          changes: blocks,
+          changes: changes.length > 0 ? changes : blocks,
           status: isError ? "failed" : "completed",
         });
         continue;

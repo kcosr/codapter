@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BackendEvent, BackendTokenUsage } from "./backend.js";
 import type { ThreadItem, ThreadTokenUsage, Turn, TurnError } from "./protocol.js";
+import { classifyToolName, synthesizeFileChanges } from "./tool-items.js";
 
 export interface TurnStateNotificationSink {
   notify(method: string, params: unknown): Promise<void>;
@@ -8,6 +9,8 @@ export interface TurnStateNotificationSink {
 
 interface ToolState {
   readonly toolCallId: string;
+  readonly toolName: string;
+  readonly input: unknown;
   readonly item: ThreadItem;
   previousOutput: string;
   startedAt: number;
@@ -71,16 +74,6 @@ function toolOutputText(output: unknown): string {
   }
 
   return textFromUnknown(output);
-}
-
-function toolItemKind(toolName: string): "commandExecution" | "fileChange" | "agentMessage" {
-  if (/bash|shell|command/i.test(toolName)) {
-    return "commandExecution";
-  }
-  if (/edit|write|patch|file/i.test(toolName)) {
-    return "fileChange";
-  }
-  return "agentMessage";
 }
 
 export class TurnStateMachine {
@@ -207,7 +200,7 @@ export class TurnStateMachine {
     }
 
     const id = randomUUID();
-    const kind = toolItemKind(toolName);
+    const kind = classifyToolName(toolName);
     const item: ThreadItem =
       kind === "commandExecution"
         ? {
@@ -226,7 +219,7 @@ export class TurnStateMachine {
           ? {
               type: "fileChange",
               id,
-              changes: [],
+              changes: synthesizeFileChanges(toolName, this.cwd, input),
               status: "inProgress",
             }
           : {
@@ -239,6 +232,8 @@ export class TurnStateMachine {
     await this.storeItem(item);
     this.toolStates.set(toolCallId, {
       toolCallId,
+      toolName,
+      input,
       item,
       previousOutput: "",
       startedAt: Date.now(),
@@ -261,12 +256,30 @@ export class TurnStateMachine {
       return this.handleToolUpdate(toolCallId, toolName, output, isCumulative);
     }
 
+    await this.applyToolOutput(state, output, isCumulative);
+  }
+
+  private async applyToolOutput(
+    state: ToolState,
+    output: unknown,
+    isCumulative: boolean
+  ): Promise<void> {
+    if (state.item.type === "fileChange") {
+      const changes = synthesizeFileChanges(state.toolName, this.cwd, state.input, output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
+    }
+
     const next = toolOutputText(output);
     const delta =
       isCumulative && next.startsWith(state.previousOutput)
         ? next.slice(state.previousOutput.length)
         : next;
     state.previousOutput = isCumulative ? next : `${state.previousOutput}${delta}`;
+    if (delta.length === 0) {
+      return;
+    }
 
     if (state.item.type === "commandExecution") {
       state.item.aggregatedOutput = (state.item.aggregatedOutput ?? "") + delta;
@@ -317,6 +330,8 @@ export class TurnStateMachine {
       return;
     }
 
+    await this.applyToolOutput(state, output, true);
+
     if (state.item.type === "commandExecution") {
       const outputText = toolOutputText(output);
       if (outputText && !state.item.aggregatedOutput) {
@@ -328,6 +343,10 @@ export class TurnStateMachine {
     }
 
     if (state.item.type === "fileChange") {
+      const changes = synthesizeFileChanges(toolName, this.cwd, state.input, output);
+      if (changes.length > 0) {
+        state.item.changes = changes;
+      }
       state.item.status = isError ? "failed" : "completed";
     }
 

@@ -108,6 +108,190 @@ describe("TurnStateMachine", () => {
     );
   });
 
+  it("hydrates file changes for write tools and emits final output deltas on tool_end", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "write",
+      input: {
+        path: "test.txt",
+        content: "hello\n",
+      },
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "write",
+      output: {
+        content: [{ type: "text", text: "Successfully wrote 6 bytes to test.txt" }],
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "add" },
+                diff: "hello\n",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/fileChange/outputDelta",
+        params: expect.objectContaining({
+          delta: "Successfully wrote 6 bytes to test.txt",
+        }),
+      })
+    );
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            status: "completed",
+          }),
+        }),
+      })
+    );
+  });
+
+  it("hydrates edit tools with add/remove diff markers and normalizes numbered output diffs", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      input: {
+        path: "test.txt",
+        oldText: "old line",
+        newText: "new line",
+      },
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/started",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -1,1 +1,1 @@\n-old line\n+new line",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      output: {
+        content: [{ type: "text", text: "Successfully replaced text in /repo/test.txt." }],
+        details: {
+          firstChangedLine: 2,
+          diff: " 1 keep\n-2 old line\n+2 new line\n 3 keep",
+        },
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -2,1 +2,1 @@\n-old line\n+new line",
+              },
+            ],
+            status: "completed",
+          }),
+        }),
+      })
+    );
+  });
+
+  it("hydrates edit tools that append lines as unified diffs with additions", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.handleEvent({
+      type: "tool_start",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      input: {
+        path: "test.txt",
+        oldText: "line five",
+        newText: "line five\nline six",
+      },
+    });
+    await machine.handleEvent({
+      type: "tool_end",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      output: {
+        content: [{ type: "text", text: "Successfully replaced text in /repo/test.txt." }],
+        details: {
+          firstChangedLine: 5,
+          diff: "   ...\n+6 line six",
+        },
+      },
+      isError: false,
+    });
+
+    expect(notifications).toContainEqual(
+      expect.objectContaining({
+        method: "item/completed",
+        params: expect.objectContaining({
+          item: expect.objectContaining({
+            type: "fileChange",
+            changes: [
+              {
+                path: "/repo/test.txt",
+                kind: { type: "update" },
+                diff: "@@ -5,1 +5,2 @@\n line five\n+line six",
+              },
+            ],
+          }),
+        }),
+      })
+    );
+  });
+
   it("creates a final agent message item from message_end text when no deltas arrived", async () => {
     const { machine, notifications } = createMachine();
 
