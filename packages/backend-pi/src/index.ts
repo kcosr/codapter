@@ -174,6 +174,56 @@ function textFromUnknown(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeHistoryContentEntry(entry: unknown): Record<string, unknown> {
+  if (isRecord(entry)) {
+    return structuredClone(entry);
+  }
+  return {
+    type: "text",
+    text: textFromUnknown(entry),
+  };
+}
+
+function userMessageContentFromHistory(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeHistoryContentEntry(entry));
+  }
+  if (isRecord(value)) {
+    return [structuredClone(value)];
+  }
+  return [
+    {
+      type: "text",
+      text: textFromUnknown(value),
+    },
+  ];
+}
+
+function assistantTextFromHistory(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!Array.isArray(value)) {
+    return textFromUnknown(value);
+  }
+
+  return value
+    .map((entry) => {
+      if (!isRecord(entry)) {
+        return textFromUnknown(entry);
+      }
+      if (entry.type === "text" && typeof entry.text === "string") {
+        return entry.text;
+      }
+      return textFromUnknown(entry);
+    })
+    .join("");
+}
+
 function mapHistoryToTurns(history: readonly BackendMessage[]) {
   const turns: Array<{
     id: string;
@@ -196,7 +246,7 @@ function mapHistoryToTurns(history: readonly BackendMessage[]) {
           {
             type: "userMessage",
             id: `${message.id}_user`,
-            content: [{ type: "text", text: textFromUnknown(message.content) }],
+            content: userMessageContentFromHistory(message.content),
           },
         ],
         status: "completed",
@@ -217,7 +267,7 @@ function mapHistoryToTurns(history: readonly BackendMessage[]) {
     current.items.push({
       type: "agentMessage",
       id: `${message.id}_agent`,
-      text: textFromUnknown(message.content),
+      text: assistantTextFromHistory(message.content),
       phase: null,
     });
   }

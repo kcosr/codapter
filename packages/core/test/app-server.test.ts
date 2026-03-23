@@ -1696,6 +1696,29 @@ describe("AppServerConnection", () => {
             notification.params?.turn?.status === "completed"
         )
       ).toBeTruthy();
+      expect(
+        notifications.filter(
+          (notification) =>
+            notification.method === "turn/started" &&
+            notification.params?.threadId === childThreadId
+        )
+      ).toHaveLength(1);
+      expect(
+        notifications.filter(
+          (notification) =>
+            notification.method === "item/started" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.item?.type === "userMessage"
+        )
+      ).toHaveLength(1);
+      expect(
+        notifications.filter(
+          (notification) =>
+            notification.method === "item/completed" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.item?.type === "agentMessage"
+        )
+      ).toHaveLength(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();
@@ -1938,6 +1961,125 @@ describe("AppServerConnection", () => {
             notification.params.item.tool === "resumeAgent"
         )
       ).toBeTruthy();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("preserves sub-agent metadata when a proxied child backend emits thread/started", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-codex-child-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const parentBackend = new TestBackend();
+    const childBackend = new CodexProxyTestBackend();
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([parentBackend, childBackend]),
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "review this",
+          model: "codex::gpt-5.4-mini",
+        },
+      })) as { result: { nickname: string } };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      ) as { params: { thread: { id: string } } } | undefined;
+      const childThreadId = childStarted?.params.thread.id ?? "";
+      expect(childThreadId).toBeTruthy();
+
+      childBackend.emit("codex_thread_handle", {
+        kind: "notification",
+        threadHandle: "codex_thread_handle",
+        method: "thread/started",
+        params: {
+          thread: {
+            id: "codex_thread_handle",
+            preview: "",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 0,
+            updatedAt: 0,
+            status: { type: "idle" },
+            path: "/tmp/codex-thread.jsonl",
+            cwd: "/repo",
+            cliVersion: "0.116.0",
+            source: "vscode",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [],
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const childNotifications = notifications.filter(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread?.id === childThreadId
+      );
+      expect(childNotifications.at(-1)).toMatchObject({
+        method: "thread/started",
+        params: {
+          thread: {
+            id: childThreadId,
+            preview: "review this",
+            modelProvider: "openai",
+            path: "/tmp/codex-thread.jsonl",
+            source: {
+              subAgent: {
+                thread_spawn: {
+                  parent_thread_id: started.result.thread.id,
+                },
+              },
+            },
+            agentNickname: spawned.result.nickname,
+            agentRole: "default",
+          },
+        },
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
       await connection.dispose();

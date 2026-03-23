@@ -474,6 +474,25 @@ describe("PiBackend", () => {
       })
     );
     expect(history.some((message) => message.role === "system")).toBe(true);
+    const threadRead = await backend.threadRead({
+      threadId,
+      threadHandle,
+      includeTurns: true,
+      cwd: sessionDir,
+    });
+    expect(threadRead.threadHandle).toBe(threadHandle);
+    expect(threadRead.turns[0]?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "userMessage",
+          content: [{ type: "text", text: "hello world" }],
+        }),
+        expect.objectContaining({
+          type: "agentMessage",
+          text: "response-1",
+        }),
+      ])
+    );
 
     const forked = await backend.threadFork({
       threadId: "thread-pi-fork",

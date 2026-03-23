@@ -420,23 +420,6 @@ function isInternalTitlePreview(preview: string | null): boolean {
   );
 }
 
-function toUserMessageContent(input: readonly UserInput[]): JsonValue[] {
-  return input.map((item): JsonValue => {
-    switch (item.type) {
-      case "text":
-        return { type: "text", text: item.text };
-      case "image":
-        return { type: "image", url: item.url };
-      case "localImage":
-        return { type: "localImage", path: item.path };
-      case "skill":
-        return { type: "skill", name: item.name, path: item.path };
-      case "mention":
-        return { type: "mention", name: item.name, path: item.path };
-    }
-  });
-}
-
 function runtimeToThreadStatus(runtime: ThreadRuntime | undefined): ThreadStatus {
   if (!runtime) {
     return { type: "notLoaded" };
@@ -1796,12 +1779,14 @@ export class AppServerConnection {
     });
 
     switch (event.kind) {
-      case "notification":
-        await this.publish(
+      case "notification": {
+        const params = await this.rewriteBackendNotification(
+          threadId,
+          event.threadHandle,
           event.method,
-          this.rewriteBackendThreadReferences(threadId, event.threadHandle, event.params),
-          threadId
+          event.params
         );
+        await this.publish(event.method, params, threadId);
         if (event.method === "turn/started" && turnId && runtime) {
           runtime.status = "turn_active";
           runtime.activeTurnId = turnId;
@@ -1812,6 +1797,7 @@ export class AppServerConnection {
           await this.finishTurn(threadId, turnId);
         }
         return;
+      }
       case "serverRequest": {
         const requestId = randomUUID();
         this.pendingBackendServerRequests.set(requestId, {
@@ -2110,6 +2096,48 @@ export class AppServerConnection {
     return rewritten;
   }
 
+  private async rewriteBackendNotification(
+    threadId: string,
+    threadHandle: string,
+    method: string,
+    params: unknown
+  ): Promise<unknown> {
+    const rewritten = this.rewriteBackendThreadReferences(threadId, threadHandle, params);
+    if (method !== "thread/started" || !isRecord(rewritten) || !isRecord(rewritten.thread)) {
+      return rewritten;
+    }
+
+    const entry = await this.threadRegistry.get(threadId);
+    if (!entry || !isSubAgentThreadSource(entry.source)) {
+      return rewritten;
+    }
+
+    const thread = rewritten.thread;
+    rewritten.thread = {
+      ...thread,
+      preview:
+        typeof thread.preview === "string" && thread.preview.length > 0
+          ? thread.preview
+          : (entry.preview ?? ""),
+      cwd: typeof thread.cwd === "string" ? thread.cwd : (entry.cwd ?? process.cwd()),
+      path:
+        typeof thread.path === "string" || thread.path === null
+          ? thread.path
+          : (entry.path ?? null),
+      source: entry.source,
+      agentNickname: entry.agentNickname,
+      agentRole: entry.agentRole,
+    };
+    return rewritten;
+  }
+
+  private shouldUseDirectBackendSubscription(threadId: string, runtime: ThreadRuntime): boolean {
+    if (!runtime.managedByCollab) {
+      return true;
+    }
+    return this.collabManager?.getAgentByThreadId(threadId) === null;
+  }
+
   private initRuntime(threadId: string, backendType: string, threadHandle: string): ThreadRuntime {
     return this.createRuntime(threadId, backendType, threadHandle, false);
   }
@@ -2158,6 +2186,10 @@ export class AppServerConnection {
 
   private bindRuntimeSubscription(threadId: string, runtime: ThreadRuntime): void {
     runtime.subscription?.dispose();
+    if (!this.shouldUseDirectBackendSubscription(threadId, runtime)) {
+      runtime.subscription = null;
+      return;
+    }
     const backend = this.requireBackend(runtime.backendType);
     runtime.subscription = backend.onEvent(runtime.threadHandle, (event) => {
       this.enqueueBackendEvent(threadId, event);
@@ -2239,7 +2271,6 @@ export class AppServerConnection {
       gitInfo: null,
     });
     const runtime = this.createRuntime(entry.threadId, input.backendType, input.threadHandle, true);
-    this.bindRuntimeSubscription(entry.threadId, runtime);
     this.transitionToReady(entry.threadId, runtime);
 
     const thread = this.buildThread(entry, []);
@@ -2249,7 +2280,7 @@ export class AppServerConnection {
 
   private async startCollabChildTurn(
     agent: { threadId: string },
-    message: string
+    _message: string
   ): Promise<string> {
     const runtime = this.threadRuntimes.get(agent.threadId);
     if (!runtime) {
@@ -2262,21 +2293,6 @@ export class AppServerConnection {
     runtime.activeTurnId = turnId;
     runtime.latestTurnId = turnId;
     await this.publishThreadStatus(agent.threadId);
-    await this.publish("turn/started", {
-      threadId: agent.threadId,
-      turn: {
-        id: turnId,
-        status: "inProgress",
-        error: null,
-        items: [
-          {
-            type: "userMessage",
-            id: `${turnId}_user`,
-            content: toUserMessageContent([{ type: "text", text: message, text_elements: [] }]),
-          },
-        ],
-      },
-    });
     return turnId;
   }
 }
