@@ -290,7 +290,23 @@ Expected:
 2. The final completion does not re-emit the same diff as duplicate plain text.
 3. Reopening the thread preserves the completed edit item.
 
-### P5. Pi parent -> Codex child sub-agent routing
+### P5. Pi child-thread rendering and reopen
+
+Prompt:
+
+```text
+Spawn exactly one Pi sub-agent using `pi::anthropic/claude-opus-4-6` reasoning `medium`. Tell the child to run `date` and report the output. Wait for the child, then summarize the result.
+```
+
+Expected:
+
+1. The parent shows one `Spawned 1 agent` collab item.
+2. Opening the child thread shows one user prompt and one rendered command result.
+3. No raw JSON `toolCall` or `toolResult` payload is rendered in the child view.
+4. Returning to the parent keeps the collab summary on the parent only.
+5. Reopening the child thread in the same app session does not duplicate the completed assistant output.
+
+### P6. Pi parent -> Codex child sub-agent routing
 
 Prompt:
 
@@ -313,7 +329,7 @@ Then validate:
 3. `close_agent`,
 4. `resume_agent` while the adapter process remains alive.
 
-### P6. Unsupported cross-backend direction
+### P7. Unsupported cross-backend direction
 
 From a Codex parent, attempt to force a Pi child if the UI/tooling exposes that path.
 
@@ -343,7 +359,8 @@ Check `/tmp/codapter-stdio.log` and `/tmp/codapter.jsonl` for:
 3. turn-id rewrite correctness,
 4. no duplicate Pi live user-message item notifications,
 5. `turn/completed` arrival before Pi follow-up turns,
-6. parent/child backend ownership during Pi -> Codex sub-agent tests.
+6. no raw JSON Pi history hydration in reopened child threads,
+7. parent/child backend ownership during Pi -> Codex sub-agent tests.
 
 ## Minimum Release Gate
 

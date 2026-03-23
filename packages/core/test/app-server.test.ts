@@ -2627,14 +2627,20 @@ describe("AppServerConnection", () => {
       })) as { result: { thread: { id: string } } };
       const threadId = started.result.thread.id;
 
-      await connection.handleMessage({
+      const startedTurn = (await connection.handleMessage({
         id: 3,
         method: "turn/start",
         params: {
           threadId,
           input: [{ type: "text", text: "What is today's date?", text_elements: [] }],
         },
-      });
+      })) as {
+        result: {
+          turn: {
+            id: string;
+          };
+        };
+      };
 
       await new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -2654,7 +2660,7 @@ describe("AppServerConnection", () => {
             id: threadId,
             turns: [
               {
-                id: "message-0",
+                id: startedTurn.result.turn.id,
                 status: "completed",
                 items: [
                   {

@@ -1254,6 +1254,7 @@ export class AppServerConnection {
     const needsCollabResume =
       collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
+    const previousLatestTurnId = existing?.latestTurnId ?? null;
     const runtime = existing
       ? this.prepareRuntimeForResume(parsed.threadId, existing)
       : this.createRuntime(
@@ -1316,6 +1317,12 @@ export class AppServerConnection {
           backendSessionId: readResult.threadHandle,
         });
         this.bindRuntimeSubscription(parsed.threadId, runtime);
+      }
+      if (previousLatestTurnId && readResult.turns.length > 0) {
+        const latestTurn = readResult.turns.at(-1);
+        if (latestTurn) {
+          latestTurn.id = previousLatestTurnId;
+        }
       }
       this.transitionToReady(parsed.threadId, runtime);
       const thread = this.buildThread(entry, [...readResult.turns]);

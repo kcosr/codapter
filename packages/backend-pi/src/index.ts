@@ -203,25 +203,48 @@ function userMessageContentFromHistory(value: unknown): Array<Record<string, unk
   ];
 }
 
-function assistantTextFromHistory(value: unknown): string {
+function textFromHistoryContent(value: unknown): string {
   if (typeof value === "string") {
     return value;
   }
-  if (!Array.isArray(value)) {
-    return textFromUnknown(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => textFromHistoryContent(entry)).join("");
   }
+  if (!isRecord(value)) {
+    return "";
+  }
+  if (value.type === "text" && typeof value.text === "string") {
+    return value.text;
+  }
+  if (Array.isArray(value.content)) {
+    return textFromHistoryContent(value.content);
+  }
+  return "";
+}
 
-  return value
-    .map((entry) => {
-      if (!isRecord(entry)) {
-        return textFromUnknown(entry);
-      }
-      if (entry.type === "text" && typeof entry.text === "string") {
-        return entry.text;
-      }
-      return textFromUnknown(entry);
-    })
-    .join("");
+function inferToolCommand(input: unknown): string {
+  if (isRecord(input)) {
+    const command = input.command;
+    if (typeof command === "string") {
+      return command;
+    }
+    if (Array.isArray(command)) {
+      return command.filter((entry): entry is string => typeof entry === "string").join(" ");
+    }
+  }
+  return textFromUnknown(input);
+}
+
+function toolCallCommandFromHistory(block: Record<string, unknown>): string {
+  const fallbackName = typeof block.name === "string" ? block.name : "tool";
+  const command = inferToolCommand(block.arguments);
+  if (command.length === 0) {
+    return fallbackName;
+  }
+  if (isRecord(block.arguments) && "command" in block.arguments) {
+    return command;
+  }
+  return `${fallbackName} ${command}`;
 }
 
 function mapHistoryToTurns(history: readonly BackendMessage[]) {
@@ -237,41 +260,138 @@ function mapHistoryToTurns(history: readonly BackendMessage[]) {
     status: "completed";
     error: null;
   } | null = null;
+  const pendingToolItems = new Map<string, Record<string, unknown>>();
+
+  const ensureTurn = (fallbackId: string) => {
+    if (current) {
+      return current;
+    }
+    current = {
+      id: fallbackId,
+      items: [],
+      status: "completed",
+      error: null,
+    };
+    turns.push(current);
+    pendingToolItems.clear();
+    return current;
+  };
+
+  const finalizeTurn = () => {
+    for (const pending of pendingToolItems.values()) {
+      if (pending.type === "commandExecution" && pending.status === "inProgress") {
+        pending.status = "completed";
+        pending.exitCode = pending.exitCode ?? 0;
+        pending.durationMs = pending.durationMs ?? 0;
+      }
+    }
+    pendingToolItems.clear();
+    current = null;
+  };
 
   for (const message of history) {
     if (message.role === "user") {
-      current = {
-        id: message.id,
-        items: [
-          {
-            type: "userMessage",
-            id: `${message.id}_user`,
-            content: userMessageContentFromHistory(message.content),
-          },
-        ],
-        status: "completed",
-        error: null,
-      };
-      turns.push(current);
+      finalizeTurn();
+      const turn = ensureTurn(message.id);
+      turn.items.push({
+        type: "userMessage",
+        id: `${message.id}_user`,
+        content: userMessageContentFromHistory(message.content),
+      });
       continue;
     }
-    if (!current) {
-      current = {
-        id: message.id,
-        items: [],
-        status: "completed",
-        error: null,
-      };
-      turns.push(current);
+
+    const turn = ensureTurn(message.id);
+    if (message.role === "assistant") {
+      const blocks = Array.isArray(message.content) ? message.content : [message.content];
+      for (const [index, block] of blocks.entries()) {
+        if (!isRecord(block)) {
+          const text = textFromHistoryContent(block);
+          if (text.length > 0) {
+            turn.items.push({
+              type: "agentMessage",
+              id: `${message.id}_agent_${index}`,
+              text,
+              phase: null,
+            });
+          }
+          continue;
+        }
+
+        if (block.type === "thinking" && typeof block.thinking === "string") {
+          turn.items.push({
+            type: "reasoning",
+            id: `${message.id}_reasoning_${index}`,
+            summary: [block.thinking],
+            content: [],
+          });
+          continue;
+        }
+
+        if (block.type === "toolCall") {
+          const toolCallId =
+            typeof block.id === "string" && block.id.length > 0
+              ? block.id
+              : `${message.id}_tool_${index}`;
+          const commandItem: Record<string, unknown> = {
+            type: "commandExecution",
+            id: `${message.id}_tool_${index}`,
+            command: toolCallCommandFromHistory(block),
+            cwd: "",
+            processId: null,
+            status: "inProgress",
+            commandActions: [],
+            aggregatedOutput: null,
+            exitCode: null,
+            durationMs: null,
+          };
+          turn.items.push(commandItem);
+          pendingToolItems.set(toolCallId, commandItem);
+          continue;
+        }
+
+        const text = textFromHistoryContent(block);
+        if (text.length > 0) {
+          turn.items.push({
+            type: "agentMessage",
+            id: `${message.id}_agent_${index}`,
+            text,
+            phase: null,
+          });
+        }
+      }
+      continue;
     }
-    current.items.push({
-      type: "agentMessage",
-      id: `${message.id}_agent`,
-      text: assistantTextFromHistory(message.content),
-      phase: null,
-    });
+
+    if (message.role === "toolResult") {
+      const payload = isRecord(message.content) ? message.content : {};
+      const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : null;
+      const pending = toolCallId ? pendingToolItems.get(toolCallId) : null;
+      const outputText = textFromHistoryContent(payload.content);
+      if (pending) {
+        pending.aggregatedOutput = outputText || null;
+        pending.status = payload.isError ? "failed" : "completed";
+        pending.exitCode = payload.isError ? 1 : 0;
+        pending.durationMs = 0;
+        if (toolCallId) {
+          pendingToolItems.delete(toolCallId);
+        }
+      }
+      continue;
+    }
+
+    const text = textFromHistoryContent(message.content);
+    if (text.length > 0) {
+      turn.items.push({
+        type: "agentMessage",
+        id: `${message.id}_agent`,
+        text,
+        phase: null,
+      });
+    }
   }
 
+  finalizeTurn();
   return turns;
 }
 

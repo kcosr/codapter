@@ -488,11 +488,26 @@ describe("PiBackend", () => {
           content: [{ type: "text", text: "hello world" }],
         }),
         expect.objectContaining({
+          type: "commandExecution",
+          command: "echo hi",
+          status: "completed",
+          aggregatedOutput: "hi",
+          exitCode: 0,
+        }),
+        expect.objectContaining({
           type: "agentMessage",
           text: "response-1",
         }),
       ])
     );
+    expect(
+      threadRead.turns[0]?.items.filter(
+        (item) =>
+          item.type === "agentMessage" &&
+          typeof item.text === "string" &&
+          (item.text.includes('"toolCallId"') || item.text.includes('"type":"toolCall"'))
+      )
+    ).toEqual([]);
 
     const forked = await backend.threadFork({
       threadId: "thread-pi-fork",

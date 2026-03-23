@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -631,8 +631,8 @@ function writeHelp(stdout: NodeJS.WritableStream): void {
 }
 
 export async function createUnixSocketPath(prefix = "codapter"): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `${prefix}-${randomUUID()}-`));
-  return join(directory, "adapter.sock");
+  const socketName = `${prefix}-${randomUUID().slice(0, 8)}.sock`;
+  return join(tmpdir(), socketName);
 }
 
 export function getTcpListenerPort(address: string): number {
