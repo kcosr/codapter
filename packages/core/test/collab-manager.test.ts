@@ -303,6 +303,66 @@ describe("CollabManager", () => {
     expect(statusChanges).toEqual(["running", "completed"]);
   });
 
+  it("emits a visible parent summary when wait_agent returns child output", async () => {
+    const { backend, manager, notifications, parentThreadId } = createManager({
+      config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },
+    });
+
+    const spawned = await spawnAgent(manager, parentThreadId);
+    notifications.length = 0;
+
+    const prompt = backend.prompts.at(-1);
+    expect(prompt).toBeDefined();
+    backend.emit(prompt?.sessionId ?? "", {
+      type: "text_delta",
+      sessionId: prompt?.sessionId ?? "",
+      turnId: prompt?.turnId ?? "",
+      delta: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+    });
+    backend.emit(prompt?.sessionId ?? "", {
+      type: "message_end",
+      sessionId: prompt?.sessionId ?? "",
+      turnId: prompt?.turnId ?? "",
+    });
+
+    await expect(
+      manager.wait({
+        parentThreadId,
+        ids: [spawned.agent_id],
+        timeout_ms: 5,
+      })
+    ).resolves.toEqual({
+      status: {
+        [spawned.agent_id]: "completed",
+      },
+      messages: {
+        [spawned.agent_id]: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+      },
+      timed_out: false,
+    });
+
+    expect(
+      notifications
+        .filter((entry) => entry.method === "item/completed")
+        .map((entry) => entry.params)
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            type: "collabAgentToolCall",
+            tool: "wait",
+          }),
+        }),
+        expect.objectContaining({
+          item: expect.objectContaining({
+            type: "agentMessage",
+            text: "Robie replied:\n\nThe output is:\n\n```\n/Users/kcassidy/codapter\n```",
+          }),
+        }),
+      ])
+    );
+  });
+
   it("transitions pendingInit to running to errored", async () => {
     const { backend, manager, parentThreadId } = createManager({
       config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },

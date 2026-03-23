@@ -321,11 +321,13 @@ export class CollabManager {
       item.status = "completed";
       item.agentsStates = this.collectAgentStates(req.ids);
       await this.emitToolItem("item/completed", req.parentThreadId, item);
-      return {
+      const response = {
         status: immediate,
         messages: this.collectFinalMessages(req.ids),
         timed_out: false,
       };
+      await this.emitWaitSummary(req.parentThreadId, req.ids, response.messages);
+      return response;
     }
 
     const response = await new Promise<CollabWaitResponse>((resolve) => {
@@ -354,6 +356,7 @@ export class CollabManager {
     item.status = "completed";
     item.agentsStates = this.collectAgentStates(req.ids);
     await this.emitToolItem("item/completed", req.parentThreadId, item);
+    await this.emitWaitSummary(req.parentThreadId, req.ids, response.messages);
     return response;
   }
 
@@ -828,6 +831,69 @@ export class CollabManager {
       },
       parentThreadId
     );
+  }
+
+  private async emitWaitSummary(
+    parentThreadId: string,
+    agentIds: readonly string[],
+    messages: Record<string, string | null>
+  ): Promise<void> {
+    const text = this.buildWaitSummary(agentIds, messages);
+    if (!text) {
+      return;
+    }
+
+    const itemId = randomUUID();
+    await this.notifySink.notify(
+      "item/started",
+      {
+        item: {
+          type: "agentMessage",
+          id: itemId,
+          text: "",
+          phase: null,
+        },
+        threadId: parentThreadId,
+        turnId: this.resolveParentTurnId(parentThreadId),
+      },
+      parentThreadId
+    );
+    await this.notifySink.notify(
+      "item/completed",
+      {
+        item: {
+          type: "agentMessage",
+          id: itemId,
+          text,
+          phase: null,
+        },
+        threadId: parentThreadId,
+        turnId: this.resolveParentTurnId(parentThreadId),
+      },
+      parentThreadId
+    );
+  }
+
+  private buildWaitSummary(
+    agentIds: readonly string[],
+    messages: Record<string, string | null>
+  ): string | null {
+    const parts: string[] = [];
+
+    for (const agentId of agentIds) {
+      const agent = this.agents.get(agentId);
+      const message = messages[agentId];
+      if (!agent || typeof message !== "string" || message.trim().length === 0) {
+        continue;
+      }
+      parts.push(`${agent.nickname} replied:\n\n${message.trim()}`);
+    }
+
+    if (parts.length === 0) {
+      return null;
+    }
+
+    return parts.join("\n\n");
   }
 
   private collectReceiverThreadIds(agentIds: readonly string[]): string[] {
