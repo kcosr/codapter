@@ -34,6 +34,7 @@ Without `--listen`, codapter serves the app-server protocol over stdio.
 
 ### Other Flags
 
+- `--collab` enables sub-agent collaboration support (creates an internal UDS listener). Also available via `CODAPTER_COLLAB=1`.
 - `--analytics-default-enabled` is accepted and ignored.
 - `--version` prints the package version.
 - `--help` prints usage.

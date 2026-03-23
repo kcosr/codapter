@@ -28,7 +28,7 @@ Status:
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
-| `config/read` | `InMemoryConfigStore.read()` via `AppServerConnection` | Returns the typed `{ config, origins, layers }` shape. Current implementation is in-memory for the process lifetime. |
+| `config/read` | `InMemoryConfigStore.read()` via `AppServerConnection` | Returns the typed `{ config, origins, layers }` shape. All writes are persisted to `~/.config/codapter/config.toml`. |
 | `config/value/write` | `InMemoryConfigStore.writeValue()` | Returns typed `ConfigWriteResponse`. |
 | `config/batchWrite` | `InMemoryConfigStore.writeBatch()` | Returns typed `ConfigWriteResponse`. |
 | `configRequirements/read` | `AppServerConnection.handleConfigRequirementsRead()` | Returns `{ requirements: null }`. |
@@ -36,7 +36,7 @@ Status:
 | `getAuthStatus` | `AppServerConnection.handleGetAuthStatus()` | Supported for compatibility. |
 | `skills/list` | `AppServerConnection.handleSkillsList()` | Currently returns an empty payload unless the backend provides data. |
 | `plugin/list` | `AppServerConnection.handlePluginList()` | Currently returns an empty payload unless the backend provides data. |
-| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.2`, with platform detection. |
+| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.1` (`ADAPTER_VERSION` in source), with platform detection. |
 
 ## Threads
 
@@ -66,7 +66,7 @@ Status:
 | `item/started` | `TurnStateMachine.storeItem()` | Emitted when a new agent message, reasoning block, command execution item, or file change item opens. |
 | `item/completed` | `TurnStateMachine.completeItem()` | Emitted when an item is closed. |
 | `item/agentMessage/delta` | `TurnStateMachine.handleTextDelta()` and tool fallback path | Used for assistant text and generic tool output that is not recognized as a command/file change. |
-| `item/reasoning/textDelta` | `TurnStateMachine.handleThinkingDelta()` | Reasoning text is accumulated into a reasoning item. |
+| `item/reasoning/summaryTextDelta` | `TurnStateMachine.handleThinkingDelta()` | Reasoning text is accumulated into a reasoning item. |
 | `item/commandExecution/outputDelta` | `TurnStateMachine.handleToolUpdate()` | Used for bash/shell/command-like tool calls. |
 | `item/fileChange/outputDelta` | `TurnStateMachine.handleToolUpdate()` | Used for edit/write/patch/file-like tool calls. |
 

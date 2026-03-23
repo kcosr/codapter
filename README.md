@@ -22,7 +22,7 @@ graph TB
         Transport["Transport Layer<br/>stdio / WebSocket TCP / WebSocket UDS"]
         AppServer["App Server<br/>JSON-RPC protocol handler"]
         Registry["Thread Registry<br/>persistent thread metadata"]
-        ConfigStore["Config Store<br/>in-memory settings"]
+        ConfigStore["Config Store<br/>persistent settings"]
         CmdExec["Command Exec<br/>adapter-native shell"]
         TurnSM["Turn State Machine<br/>event decomposition"]
     end
@@ -240,6 +240,7 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 | `CODAPTER_PI_ARGS` | Override Pi launch args (JSON array string); `--session-dir` is always appended | `["--yes","@mariozechner/pi-coding-agent","--mode","rpc"]` |
 | `CODAPTER_PI_IDLE_TIMEOUT_MS` | Idle timeout before Pi processes are gracefully stopped (ms; 0 disables) | `300000` (5 min) |
 | `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codex-app-server` |
+| `CODAPTER_COLLAB_EXTENSION_PATH` | Override path to the collab extension script | *(built-in)* |
 | `CODAPTER_DEBUG_LOG_FILE` | Path to JSONL debug log file | *(disabled)* |
 
 ### Config Store
@@ -274,13 +275,13 @@ The Pi backend uses its own configuration at `~/.pi/agent/`:
 | `turn/interrupt` | Cancel in-progress turn |
 | `model/list` | List available models from backend |
 | `config/read` | Read adapter configuration |
-| `config/value/write` / `config/batchWrite` | Write configuration (in-memory) |
+| `config/value/write` / `config/batchWrite` | Write configuration (persisted to disk) |
 | `configRequirements/read` | Returns null (no requirements) |
 | `getAuthStatus` / `account/read` | Returns synthetic auth state (chatgpt/pro) |
 | `command/exec` | Execute shell commands (adapter-native) |
 | `command/exec/write` | Write to process stdin |
 | `command/exec/terminate` | Kill running process |
-| `command/exec/resize` | Resize terminal (accepted; no-op without PTY) |
+| `command/exec/resize` | Resize terminal (returns unsupported error without PTY) |
 | `account/login/start` | API key or ChatGPT token login |
 | `account/login/cancel` | Cancel login flow |
 | `account/logout` | Logout and clear auth state |
@@ -509,7 +510,7 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 - **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
 - **No PTY mode**: `command/exec` with `tty: true` is rejected
 - **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
-- **Limited config persistence**: Only `model` and `model_reasoning_effort` are persisted to disk (`~/.config/codapter/config.toml`); other settings changed through the GUI are reset when the adapter restarts
+- **Config store class name**: The class is still named `InMemoryConfigStore` but all writes are persisted to `~/.config/codapter/config.toml`; the name is a vestige of the original design
 
 ## Roadmap
 

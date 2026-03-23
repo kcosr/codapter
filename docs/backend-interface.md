@@ -22,6 +22,7 @@
 - `disposeSession(sessionId)`: release backend-side session state.
 - `readSessionHistory(sessionId)`: return persisted messages for `thread/read` hydration.
 - `setSessionName(sessionId, name)`: persist a user-visible session name.
+- `getSessionPath(sessionId)`: return the backend-owned filesystem path for a session, or null.
 
 ## Turn Methods
 

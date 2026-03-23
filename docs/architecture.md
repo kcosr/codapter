@@ -54,7 +54,7 @@ The adapter-owned registry is the source of truth for thread metadata.
 `packages/core/src/turn-state.ts` normalizes backend events into Codex item notifications.
 
 - `text_delta` maps to `item/agentMessage/delta`.
-- `thinking_delta` maps to `item/reasoning/textDelta`.
+- `thinking_delta` maps to `item/reasoning/summaryTextDelta`.
 - Tool events map to `commandExecution`, `fileChange`, or `agentMessage` items based on the tool name.
 - `tool_update.isCumulative` is diffed before emitting deltas when the backend provides cumulative output.
 - `message_end` and `error` terminate the active turn.
