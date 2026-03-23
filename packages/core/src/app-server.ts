@@ -163,6 +163,7 @@ interface ThreadRuntime {
   status: "starting" | "ready" | "turn_active" | "forking" | "terminating";
   activeTurnId: string | null;
   latestTurnId: string | null;
+  loadedTurnIds: string[];
   subscription: Disposable | null;
   eventQueue: Promise<void>;
   readyResolver: (() => void) | null;
@@ -1254,7 +1255,6 @@ export class AppServerConnection {
     const needsCollabResume =
       collabAgent?.status === "shutdown" || collabAgent?.status === "errored";
     const existing = this.threadRuntimes.get(parsed.threadId);
-    const previousLatestTurnId = existing?.latestTurnId ?? null;
     const runtime = existing
       ? this.prepareRuntimeForResume(parsed.threadId, existing)
       : this.createRuntime(
@@ -1318,14 +1318,10 @@ export class AppServerConnection {
         });
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
-      if (previousLatestTurnId && readResult.turns.length > 0) {
-        const latestTurn = readResult.turns.at(-1);
-        if (latestTurn) {
-          latestTurn.id = previousLatestTurnId;
-        }
-      }
+      const turns = [...readResult.turns];
+      this.reconcileLoadedTurnIds(parsed.threadId, turns);
       this.transitionToReady(parsed.threadId, runtime);
-      const thread = this.buildThread(entry, [...readResult.turns]);
+      const thread = this.buildThread(entry, turns);
       await this.publishThreadStatus(parsed.threadId);
       return await this.buildThreadExecutionResponse(
         thread,
@@ -1426,7 +1422,9 @@ export class AppServerConnection {
         includeTurns: true,
         cwd: entry.cwd ?? process.cwd(),
       });
-      const thread = this.buildThread(entry, [...readResult.turns]);
+      const turns = [...readResult.turns];
+      this.reconcileLoadedTurnIds(entry.threadId, turns);
+      const thread = this.buildThread(entry, turns);
       await this.publish("thread/started", { thread }, entry.threadId);
       await this.publishThreadStatus(entry.threadId);
       return await this.buildThreadExecutionResponse(
@@ -1474,6 +1472,9 @@ export class AppServerConnection {
       }
     }
     const turns = parsed.includeTurns ? [...readResult.turns] : [];
+    if (parsed.includeTurns) {
+      this.reconcileLoadedTurnIds(parsed.threadId, turns);
+    }
     return { thread: this.buildThread(entry, turns) };
   }
 
@@ -1713,6 +1714,7 @@ export class AppServerConnection {
         runtime.activeTurnId = startedTurn.turnId;
         runtime.latestTurnId = startedTurn.turnId;
       }
+      this.recordLoadedTurnId(runtime, backendTurnId, turnId);
     } catch (error) {
       await this.finishTurn(parsed.threadId, turnId);
       throw error;
@@ -1795,12 +1797,17 @@ export class AppServerConnection {
         );
         await this.publish(event.method, params, threadId);
         if (event.method === "turn/started" && turnId && runtime) {
+          const previousTurnId = runtime.activeTurnId;
           runtime.status = "turn_active";
           runtime.activeTurnId = turnId;
           runtime.latestTurnId = turnId;
+          this.recordLoadedTurnId(runtime, turnId, previousTurnId);
           await this.publishThreadStatus(threadId);
         }
         if (event.method === "turn/completed" && turnId) {
+          if (runtime) {
+            this.recordLoadedTurnId(runtime, turnId, runtime.activeTurnId);
+          }
           await this.finishTurn(threadId, turnId);
         }
         return;
@@ -2179,6 +2186,7 @@ export class AppServerConnection {
       status: "starting",
       activeTurnId: null,
       latestTurnId: null,
+      loadedTurnIds: [],
       subscription: null,
       eventQueue: Promise.resolve(),
       readyResolver,
@@ -2211,6 +2219,46 @@ export class AppServerConnection {
     runtime.readyResolver = null;
     runtime.readyPromise = null;
     this.logTransition(threadId, from, "ready");
+  }
+
+  private recordLoadedTurnId(
+    runtime: ThreadRuntime,
+    turnId: string,
+    previousTurnId: string | null = null
+  ): void {
+    if (previousTurnId) {
+      const previousIndex = runtime.loadedTurnIds.lastIndexOf(previousTurnId);
+      if (previousIndex >= 0) {
+        runtime.loadedTurnIds[previousIndex] = turnId;
+      }
+    }
+
+    if (runtime.loadedTurnIds.at(-1) !== turnId && !runtime.loadedTurnIds.includes(turnId)) {
+      runtime.loadedTurnIds.push(turnId);
+    }
+
+    runtime.latestTurnId = turnId;
+  }
+
+  private reconcileLoadedTurnIds(threadId: string, turns: Turn[]): void {
+    const runtime = this.threadRuntimes.get(threadId);
+    if (!runtime || turns.length === 0) {
+      return;
+    }
+
+    if (runtime.loadedTurnIds.length > 0) {
+      const suffixLength = Math.min(turns.length, runtime.loadedTurnIds.length);
+      const loadedSuffix = runtime.loadedTurnIds.slice(-suffixLength);
+      for (const [offset, turnId] of loadedSuffix.entries()) {
+        const turn = turns[turns.length - suffixLength + offset];
+        if (turn) {
+          turn.id = turnId;
+        }
+      }
+    }
+
+    runtime.loadedTurnIds = turns.map((turn) => turn.id);
+    runtime.latestTurnId = runtime.loadedTurnIds.at(-1) ?? runtime.latestTurnId;
   }
 
   private logTransition(threadId: string, from: string, to: string): void {

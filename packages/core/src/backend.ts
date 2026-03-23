@@ -223,6 +223,7 @@ export interface BackendTurnStartInput {
   readonly input: readonly UserInput[];
   readonly model: string | null;
   readonly reasoningEffort: string | null;
+  readonly emitUserMessage?: boolean;
 }
 
 export interface BackendTurnStartResult {

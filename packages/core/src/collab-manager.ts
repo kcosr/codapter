@@ -610,6 +610,7 @@ export class CollabManager {
         input: [{ type: "text", text: message, text_elements: [] }],
         model: null,
         reasoningEffort: null,
+        emitUserMessage: true,
       });
     } catch (error) {
       this.transitionAgent(

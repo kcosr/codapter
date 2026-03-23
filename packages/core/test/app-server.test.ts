@@ -27,6 +27,7 @@ class TestBackend implements IBackend {
   private readonly activeTurns = new Map<string, string>();
   private sessionCounter = 0;
   private readonly models: readonly BackendModelSummary[];
+  private readonly userMessageNotifyDefault: boolean;
   public readonly sessionHistories = new Map<string, BackendMessage[]>();
   public readonly elicitationResponses: Array<{
     sessionId: string;
@@ -48,9 +49,11 @@ class TestBackend implements IBackend {
     options: {
       backendType?: string;
       models?: readonly BackendModelSummary[];
+      userMessageNotifyDefault?: boolean;
     } = {}
   ) {
     this.backendType = options.backendType ?? "pi";
+    this.userMessageNotifyDefault = options.userMessageNotifyDefault ?? true;
     this.models = options.models ?? [
       {
         id: "model_1",
@@ -250,6 +253,7 @@ class TestBackend implements IBackend {
     cwd: string;
     input: Array<{ type: string; text?: string }>;
     model?: string | null;
+    emitUserMessage?: boolean;
   }) {
     this.threadIdsBySession.set(input.threadHandle, input.threadId);
     if (input.model) {
@@ -268,7 +272,8 @@ class TestBackend implements IBackend {
     this.machines.set(input.threadHandle, machine);
     await machine.emitStarted();
     await machine.emitUserMessage(
-      input.input.map((entry) => ({ type: "text", text: entry.text ?? "" }))
+      input.input.map((entry) => ({ type: "text", text: entry.text ?? "" })),
+      { notify: input.emitUserMessage ?? this.userMessageNotifyDefault }
     );
     const text = input.input
       .filter((entry) => entry.type === "text" && typeof entry.text === "string")
@@ -2068,6 +2073,153 @@ describe("AppServerConnection", () => {
     }
   });
 
+  it("emits child user messages for collab send_input when the backend suppresses ordinary live prompts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-followup-user-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const backend = new TestBackend(
+      async ({ sessionId, turnId, text }) => {
+        queueMicrotask(() => {
+          backend.emit(sessionId, {
+            type: "text_delta",
+            sessionId,
+            turnId,
+            delta: `done:${text}`,
+          });
+          backend.emit(sessionId, {
+            type: "message_end",
+            sessionId,
+            turnId,
+          });
+        });
+      },
+      { userMessageNotifyDefault: false }
+    );
+    const connection = new AppServerConnection({
+      backend,
+      collabEnabled: true,
+      threadRegistry,
+      onMessage(message) {
+        notifications.push(message as { method: string; params?: Record<string, unknown> });
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      const spawned = (await callSocket(socketPath ?? "", {
+        id: 3,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "initial task",
+          model: "pi::anthropic/claude-opus-4-6",
+          reasoning_effort: "medium",
+        },
+      })) as { result: { agent_id: string } };
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 4,
+          method: "collab/wait",
+          params: {
+            parentThreadId: started.result.thread.id,
+            ids: [spawned.result.agent_id],
+            timeout_ms: 100,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 4,
+        result: {
+          timed_out: false,
+        },
+      });
+
+      const childStarted = notifications.find(
+        (notification) =>
+          notification.method === "thread/started" &&
+          notification.params?.thread &&
+          notification.params.thread.id !== started.result.thread.id
+      ) as { params: { thread: { id: string } } } | undefined;
+      expect(childStarted).toBeDefined();
+      const childThreadId = childStarted?.params.thread.id ?? "";
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 5,
+          method: "collab/sendInput",
+          params: {
+            parentThreadId: started.result.thread.id,
+            id: spawned.result.agent_id,
+            message: "follow up",
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        result: {
+          submission_id: expect.any(String),
+        },
+      });
+
+      await expect(
+        callSocket(socketPath ?? "", {
+          id: 6,
+          method: "collab/wait",
+          params: {
+            parentThreadId: started.result.thread.id,
+            ids: [spawned.result.agent_id],
+            timeout_ms: 100,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 6,
+        result: {
+          timed_out: false,
+        },
+      });
+
+      const childUserMessages = notifications
+        .filter(
+          (notification) =>
+            notification.method === "item/started" &&
+            notification.params?.threadId === childThreadId &&
+            notification.params?.item?.type === "userMessage"
+        )
+        .map((notification) => {
+          const content = notification.params?.item?.content as
+            | Array<{ text?: string }>
+            | undefined;
+          return content?.[0]?.text ?? null;
+        });
+
+      expect(childUserMessages).toEqual(["initial task", "follow up"]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
   it("preserves sub-agent metadata when a proxied child backend emits thread/started", async () => {
     const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-codex-child-"));
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
@@ -2771,6 +2923,198 @@ describe("AppServerConnection", () => {
                   {
                     type: "agentMessage",
                     text: "Today's date is 2026-03-22.",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+      await connection.dispose();
+    }
+  });
+
+  it("reuses loaded live turn ids for all completed turns when resuming a thread", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-live-turn-ids-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const backend = new TestBackend(async ({ sessionId, turnId, text }) => {
+      if (text === "What is today's date?") {
+        backend.sessionHistories.set(sessionId, [
+          {
+            id: "message-0",
+            role: "user",
+            content: [{ type: "text", text }],
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            id: "message-1",
+            role: "assistant",
+            content: [{ type: "text", text: "Today's date is March 23, 2026." }],
+            createdAt: "2026-01-01T00:00:01.000Z",
+          },
+        ]);
+        queueMicrotask(() => {
+          backend.emit(sessionId, {
+            type: "message_end",
+            sessionId,
+            turnId,
+            text: "Today's date is March 23, 2026.",
+          });
+        });
+        return;
+      }
+
+      if (text === "Run the `pwd` command and tell me the output.") {
+        backend.sessionHistories.set(sessionId, [
+          {
+            id: "message-0",
+            role: "user",
+            content: [{ type: "text", text: "What is today's date?" }],
+            createdAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            id: "message-1",
+            role: "assistant",
+            content: [{ type: "text", text: "Today's date is March 23, 2026." }],
+            createdAt: "2026-01-01T00:00:01.000Z",
+          },
+          {
+            id: "message-2",
+            role: "user",
+            content: [{ type: "text", text }],
+            createdAt: "2026-01-01T00:00:02.000Z",
+          },
+          {
+            id: "message-3",
+            role: "assistant",
+            content: [{ type: "text", text: "/Users/kcassidy/codapter" }],
+            createdAt: "2026-01-01T00:00:03.000Z",
+          },
+        ]);
+        queueMicrotask(() => {
+          backend.emit(sessionId, {
+            type: "message_end",
+            sessionId,
+            turnId,
+            text: "/Users/kcassidy/codapter",
+          });
+        });
+      }
+    });
+    const connection = new AppServerConnection({
+      backend,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/repo",
+          modelProvider: "pi",
+        },
+      })) as { result: { thread: { id: string } } };
+      const threadId = started.result.thread.id;
+
+      const firstTurn = (await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [{ type: "text", text: "What is today's date?", text_elements: [] }],
+        },
+      })) as {
+        result: {
+          turn: {
+            id: string;
+          };
+        };
+      };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      const secondTurn = (await connection.handleMessage({
+        id: 4,
+        method: "turn/start",
+        params: {
+          threadId,
+          input: [
+            {
+              type: "text",
+              text: "Run the `pwd` command and tell me the output.",
+              text_elements: [],
+            },
+          ],
+        },
+      })) as {
+        result: {
+          turn: {
+            id: string;
+          };
+        };
+      };
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "thread/resume",
+          params: {
+            threadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 5,
+        result: {
+          thread: {
+            id: threadId,
+            turns: [
+              {
+                id: firstTurn.result.turn.id,
+                status: "completed",
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [{ type: "text", text: "What is today's date?" }],
+                  },
+                  {
+                    type: "agentMessage",
+                    text: "Today's date is March 23, 2026.",
+                  },
+                ],
+              },
+              {
+                id: secondTurn.result.turn.id,
+                status: "completed",
+                items: [
+                  {
+                    type: "userMessage",
+                    content: [
+                      {
+                        type: "text",
+                        text: "Run the `pwd` command and tell me the output.",
+                      },
+                    ],
+                  },
+                  {
+                    type: "agentMessage",
+                    text: "/Users/kcassidy/codapter",
                   },
                 ],
               },

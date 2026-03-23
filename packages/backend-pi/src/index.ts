@@ -578,7 +578,9 @@ export class PiBackend implements IBackend {
     await runtime.machine.emitStarted();
     const userContent = toUserMessageContent(input.input);
     if (userContent.length > 0) {
-      await runtime.machine.emitUserMessage(userContent as never, { notify: false });
+      await runtime.machine.emitUserMessage(userContent as never, {
+        notify: input.emitUserMessage ?? false,
+      });
     }
 
     if (input.model) {
