@@ -2,7 +2,7 @@
 
 > **WIP / Prototype** — This project is an early-stage proof of concept. APIs, configuration, and behavior may change without notice. Not recommended for production use.
 
-A protocol adapter that lets clients built around the Codex app-server protocol — including [Codex Desktop](https://developers.openai.com/codex/app), the Codex CLI, and third-party applications — work with alternative AI backends. There are a growing number of well-built clients that speak this protocol; codapter lets you plug any of them into the backend of your choice.
+A protocol adapter that lets clients built around the Codex app-server protocol — including [Codex Desktop](https://developers.openai.com/codex/app), the Codex CLI, and third-party applications — work with alternative AI backends. There are a growing number of well-built clients that speak this protocol; codapter lets you plug any of them into supported alternative backends.
 
 ![Codapter running inside Codex Desktop](docs/images/codex-desktop-example.png)
 
