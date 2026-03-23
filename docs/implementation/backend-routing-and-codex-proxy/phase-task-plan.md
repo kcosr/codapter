@@ -249,48 +249,61 @@ This section is mandatory for execution. The same format is also used here to re
 
 ### 9.1 Phase 1 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `7e9ca49`, `f99e00a`
+- acceptance evidence: locked routed `IBackend` signatures in `packages/core/src/backend.ts`; added `packages/core/src/backend-router.ts` with backend registration, prefixed model parsing, and single aggregated default arbitration; removed single-backend-only core wiring assumptions and locked backend-originated `error`/`disconnect` event handling in app-server routing paths.
+- review run IDs + triage outcomes:
+  - `r_20260323193617115_1052d003` (Gemini): accepted contract/router default-selection and event-buffering checks; deferred dedicated router/buffer unit test expansion to hardening backlog.
+  - `r_20260323193617115_4712fb59` (Pi): accepted routed contract freeze and no-drop event-ordering semantics; rejected legacy migration fallback suggestions (`no backward-compatibility bridges` rule).
+  - `r_20260323193947576_67de5d57` (Codex): accepted removal of hardcoded single-backend assumptions and explicit backend error-event surfacing; deferred optional router availability-surface expansion beyond scoped deliverables.
+- go/no-go decision: go
 
 ### 9.2 Phase 2 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `f99e00a`
+- acceptance evidence: Pi backend fully ported to routed `IBackend` thread/turn methods (`threadStart`, `threadResume`, `threadFork`, `threadRead`, `threadArchive`, `threadSetName`, `turnStart`, `turnInterrupt`, `resolveServerRequest`); `thread/read` uses backend-neutral result shape from backend-owned hydration; stale core-only turn-history helpers removed from active code paths.
+- review run IDs + triage outcomes:
+  - `r_20260323194306368_1da362ea` (Gemini): accepted Pi port coverage and backend-neutral read checks; rejected legacy-thread compatibility fallback recommendations per topic rule.
+  - `r_20260323195034165_f886ac51` (Pi): accepted cleanup of dead app-server turn-history abstractions and per-turn model-application correctness; deferred richer Pi historical tool-item parity as non-blocking follow-up.
+- go/no-go decision: go
 
 ### 9.3 Phase 3 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `3e8d107`
+- acceptance evidence: added `packages/backend-codex` stdio proxy backend with initialize handshake, request/response/notification relay, model-id rewrite, and backend event buffering; wired Codex backend registration and startup in CLI while preserving partial availability (Codex startup failure does not poison Pi model/thread operations).
+- review run IDs + triage outcomes:
+  - `r_20260323194347339_150601d2` (Gemini): accepted stdio proxy scope, request-id relay, and partial availability semantics; deferred deeper process-lifecycle crash/timeout matrix coverage.
+  - `r_20260323195358155_8f799b04` (Pi): accepted Codex proxy integration and backend error/disconnect surfacing direction; deferred expanded Codex `threadResume`/`threadFork`/`threadRead` coverage depth as follow-up hardening.
+- go/no-go decision: go
 
 ### 9.4 Phase 4 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `3e8d107`
+- acceptance evidence: websocket transport path implemented as deterministic reject (`Codex websocket transport is deferred in this implementation`) with explicit configuration path retained and tests asserting reject behavior, including URL-qualified defer messages.
+- review run IDs + triage outcomes:
+  - `r_20260323194624048_53c1e18f` (Gemini): accepted defer-and-reject path as valid phase outcome; deferred reconnect/recovery semantics until websocket implementation is in scope.
+  - `r_20260323195625099_1005333d` (Pi): accepted deterministic reject behavior and evidence-backed defer decision; deferred optional no-op disposal edge-case expansion (non-blocking).
+- go/no-go decision: go
 
 ### 9.5 Phase 5 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `01a0cdd`
+- acceptance evidence: `CollabManager` routes child operations through owning backend across `spawn`, `sendInput`, `wait`, `resume`, and `close`; child runtime metadata persists `backendType`; invalid cross-backend selections fail deterministically; stale backend runtime transitions now surface deterministic failure paths.
+- review run IDs + triage outcomes:
+  - `r_20260323194731578_8294185e` (Gemini): accepted backend-aware child-operation routing and deterministic failure handling direction; deferred additional backend-crash chaos testing depth.
+  - `r_20260323195834225_3006d928` (Pi): accepted backend-aware collab routing coverage and child backend ownership persistence; deferred nested-collab passthrough behavior as out-of-scope.
+- go/no-go decision: go
 
 ### 9.6 Phase 6 Evidence
 
-- completion date: pending
-- commit hash(es): pending
-- acceptance evidence: pending
-- review run IDs + triage outcomes: pending
-- go/no-go decision: pending
+- completion date: 2026-03-23
+- commit hash(es): `953b763`
+- acceptance evidence: finalized reference docs for routed multi-backend architecture (`docs/backend-interface.md`, `docs/architecture.md`, `docs/api-mapping.md`) and implementation status index (`docs/implementation/implementation-plan.md`); completed verification suite: `npm run lint`, `npm test`, `npm run build`, and `npm run check` all green on the final branch state.
+- review run IDs + triage outcomes:
+  - `r_20260323194739659_024aa1f1` (Gemini): accepted final hardening direction and documentation closure; deferred extended concurrent-load soak coverage as non-blocking.
+  - `r_20260323200115151_7c3a2d44` (Pi): accepted docs/test alignment closure and dead-abstraction hardening direction; deferred additional long-tail mixed-backend failure-matrix coverage for future increments.
+- go/no-go decision: go
