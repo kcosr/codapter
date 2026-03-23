@@ -1190,7 +1190,7 @@ export class AppServerConnection {
       cwd: parsed.cwd ?? process.cwd(),
       model: selection.selection.rawModelId,
       reasoningEffort: effectiveReasoningEffort,
-      launchConfig: this.createBackendSessionLaunchConfig(threadId),
+      launchConfig: await this.createBackendSessionLaunchConfig(threadId),
     });
     const selectedModel =
       effectiveModel && parseBackendModelId(effectiveModel)
@@ -1279,7 +1279,7 @@ export class AppServerConnection {
         cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
-        launchConfig: this.createBackendSessionLaunchConfig(parsed.threadId),
+        launchConfig: await this.createBackendSessionLaunchConfig(parsed.threadId),
       });
       runtime.backendType = entry.backendType;
       runtime.threadHandle = resumed.threadHandle;
@@ -1393,7 +1393,7 @@ export class AppServerConnection {
         cwd: parsed.cwd ?? sourceEntry.cwd ?? process.cwd(),
         model: requestedSelection?.selection.rawModelId ?? null,
         reasoningEffort: effectiveReasoningEffort,
-        launchConfig: this.createBackendSessionLaunchConfig(forkThreadId),
+        launchConfig: await this.createBackendSessionLaunchConfig(forkThreadId),
       });
       const ephemeral = parsed.ephemeral ?? false;
       const entry = await this.threadRegistry.create({
@@ -2239,7 +2239,9 @@ export class AppServerConnection {
     return this.collabUdsListener?.socketPath ?? null;
   }
 
-  private createBackendSessionLaunchConfig(threadId: string): BackendSessionLaunchConfig {
+  private async createBackendSessionLaunchConfig(
+    threadId: string
+  ): Promise<BackendSessionLaunchConfig> {
     if (!this.collabEnabled || !this.collabUdsListener) {
       return {};
     }
@@ -2247,7 +2249,40 @@ export class AppServerConnection {
     return {
       threadId,
       collabSocketPath: this.collabUdsListener.socketPath,
+      availableModelsDescription: await this.createCollabAvailableModelsDescription(),
     };
+  }
+
+  private async createCollabAvailableModelsDescription(): Promise<string | null> {
+    let models: Awaited<ReturnType<BackendRouter["listModels"]>>;
+    try {
+      models = await this.backendRouter.listModels();
+    } catch {
+      return null;
+    }
+
+    if (models.length === 0) {
+      return null;
+    }
+
+    const lines = models.flatMap((model) => {
+      const name = typeof model.model === "string" ? model.model : null;
+      if (!name) {
+        return [];
+      }
+
+      const efforts = model.supportedReasoningEfforts
+        .map((entry) => entry.reasoningEffort)
+        .filter((entry) => entry.length > 0)
+        .join(", ");
+      return [`- ${name}${efforts ? `: ${efforts}` : ""}`];
+    });
+
+    if (lines.length === 0) {
+      return null;
+    }
+
+    return `Available models (use the backend-prefixed model id exactly as shown):\n${lines.join("\n")}`;
   }
 
   private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {

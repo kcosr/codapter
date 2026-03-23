@@ -40,6 +40,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    argv: process.argv.slice(2),",
     "    collabSocketPath: process.env.CODAPTER_COLLAB_UDS ?? null,",
     "    parentThreadId: process.env.CODAPTER_COLLAB_PARENT_THREAD ?? null,",
+    "    availableModelsDescription: process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION ?? null,",
     "  }), 'utf8');",
     "}",
     "",
@@ -633,6 +634,8 @@ describe("PiBackend", () => {
       await backend.createSession({
         threadId: "thread-parent-123",
         collabSocketPath: "/tmp/codapter-collab-test.sock",
+        availableModelsDescription:
+          "Available models (use the backend-prefixed model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- codex::gpt-5.4: medium",
       });
     } finally {
       await backend.dispose();
@@ -642,9 +645,12 @@ describe("PiBackend", () => {
       argv: string[];
       collabSocketPath: string | null;
       parentThreadId: string | null;
+      availableModelsDescription: string | null;
     };
     expect(launch.collabSocketPath).toBe("/tmp/codapter-collab-test.sock");
     expect(launch.parentThreadId).toBe("thread-parent-123");
+    expect(launch.availableModelsDescription).toContain("pi::anthropic/claude-opus-4-6");
+    expect(launch.availableModelsDescription).toContain("codex::gpt-5.4");
     expect(launch.argv).toContain("--extension");
     expect(launch.argv).toContain(extensionPath);
   });

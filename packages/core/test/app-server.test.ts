@@ -10,6 +10,8 @@ import type {
   BackendAppServerEvent,
   BackendEvent,
   BackendMessage,
+  BackendModelSummary,
+  BackendSessionLaunchConfig,
   IBackend,
 } from "../src/backend.js";
 import { InMemoryConfigStore } from "../src/config-store.js";
@@ -17,13 +19,14 @@ import { ThreadRegistry } from "../src/thread-registry.js";
 import { TurnStateMachine, toThreadTokenUsage } from "../src/turn-state.js";
 
 class TestBackend implements IBackend {
-  public readonly backendType = "pi";
+  public readonly backendType: string;
   private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
   private readonly machines = new Map<string, TurnStateMachine>();
   private readonly eventPipelines = new Map<string, Promise<void>>();
   private readonly threadIdsBySession = new Map<string, string>();
   private readonly activeTurns = new Map<string, string>();
   private sessionCounter = 0;
+  private readonly models: readonly BackendModelSummary[];
   public readonly sessionHistories = new Map<string, BackendMessage[]>();
   public readonly elicitationResponses: Array<{
     sessionId: string;
@@ -31,14 +34,47 @@ class TestBackend implements IBackend {
     response: unknown;
   }> = [];
   public readonly setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+  public readonly launchConfigs: Array<{
+    threadId: string;
+    launchConfig: BackendSessionLaunchConfig | undefined;
+  }> = [];
 
   constructor(
     private readonly onPromptCallback?: (args: {
       sessionId: string;
       turnId: string;
       text: string;
-    }) => void | Promise<void>
-  ) {}
+    }) => void | Promise<void>,
+    options: {
+      backendType?: string;
+      models?: readonly BackendModelSummary[];
+    } = {}
+  ) {
+    this.backendType = options.backendType ?? "pi";
+    this.models = options.models ?? [
+      {
+        id: "model_1",
+        model: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        description: "Fast model",
+        hidden: false,
+        isDefault: true,
+        inputModalities: ["text"],
+        supportedReasoningEfforts: [
+          {
+            reasoningEffort: "minimal",
+            description: "Fast responses with lighter reasoning",
+          },
+          {
+            reasoningEffort: "medium",
+            description: "Balanced reasoning",
+          },
+        ],
+        defaultReasoningEffort: "medium",
+        supportsPersonality: true,
+      },
+    ];
+  }
 
   async initialize() {}
   async dispose() {}
@@ -96,29 +132,7 @@ class TestBackend implements IBackend {
   }
 
   async listModels() {
-    return [
-      {
-        id: "model_1",
-        model: "gpt-5.4-mini",
-        displayName: "GPT-5.4 Mini",
-        description: "Fast model",
-        hidden: false,
-        isDefault: true,
-        inputModalities: ["text"],
-        supportedReasoningEfforts: [
-          {
-            reasoningEffort: "minimal",
-            description: "Fast responses with lighter reasoning",
-          },
-          {
-            reasoningEffort: "medium",
-            description: "Balanced reasoning",
-          },
-        ],
-        defaultReasoningEffort: "medium",
-        supportsPersonality: true,
-      },
-    ];
+    return this.models;
   }
 
   async setModel(sessionId: string, modelId: string) {
@@ -152,9 +166,11 @@ class TestBackend implements IBackend {
     cwd: string;
     model: string | null;
     reasoningEffort: string | null;
+    launchConfig?: BackendSessionLaunchConfig;
   }) {
     const sessionId = await this.createSession();
     this.threadIdsBySession.set(sessionId, input.threadId);
+    this.launchConfigs.push({ threadId: input.threadId, launchConfig: input.launchConfig });
     if (input.model) {
       await this.setModel(sessionId, input.model);
     }
@@ -171,9 +187,11 @@ class TestBackend implements IBackend {
     threadHandle: string;
     model: string | null;
     reasoningEffort: string | null;
+    launchConfig?: BackendSessionLaunchConfig;
   }) {
     const sessionId = await this.resumeSession(input.threadHandle);
     this.threadIdsBySession.set(sessionId, input.threadId);
+    this.launchConfigs.push({ threadId: input.threadId, launchConfig: input.launchConfig });
     if (input.model) {
       await this.setModel(sessionId, input.model);
     }
@@ -190,9 +208,11 @@ class TestBackend implements IBackend {
     sourceThreadHandle: string;
     model: string | null;
     reasoningEffort: string | null;
+    launchConfig?: BackendSessionLaunchConfig;
   }) {
     const sessionId = await this.forkSession(input.sourceThreadHandle);
     this.threadIdsBySession.set(sessionId, input.threadId);
+    this.launchConfigs.push({ threadId: input.threadId, launchConfig: input.launchConfig });
     if (input.model) {
       await this.setModel(sessionId, input.model);
     }
@@ -1213,6 +1233,87 @@ describe("AppServerConnection", () => {
         nextCursor: null,
       },
     });
+  });
+
+  it("injects aggregated backend-prefixed model ids into collab launch config", async () => {
+    const piBackend = new TestBackend(undefined, {
+      backendType: "pi",
+      models: [
+        {
+          id: "model_1",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          description: "Pi model",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const codexBackend = new TestBackend(undefined, {
+      backendType: "codex",
+      models: [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          displayName: "GPT-5.4",
+          description: "Codex model",
+          hidden: false,
+          isDefault: false,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([piBackend, codexBackend]),
+      collabEnabled: true,
+    });
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          model: "pi::anthropic/claude-opus-4-6",
+          cwd: "/repo",
+        },
+      });
+
+      expect(piBackend.launchConfigs[0]?.launchConfig).toMatchObject({
+        threadId: expect.any(String),
+        collabSocketPath: expect.stringContaining("codapter-collab-"),
+        availableModelsDescription:
+          "Available models (use the backend-prefixed model id exactly as shown):\n" +
+          "- pi::anthropic/claude-opus-4-6: medium\n" +
+          "- codex::gpt-5.4: medium",
+      });
+    } finally {
+      await connection.dispose();
+    }
   });
 
   it("returns empty startup list responses for desktop compatibility", async () => {

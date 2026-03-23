@@ -76,7 +76,9 @@ export interface CollabManagerOptions {
   resolveThreadSessionId?(threadId: string): string;
   resolveThreadHandle(threadId: string): string;
   resolveThreadBackendType(threadId: string): string;
-  createSessionLaunchConfig?(threadId: string): BackendSessionLaunchConfig;
+  createSessionLaunchConfig?(
+    threadId: string
+  ): BackendSessionLaunchConfig | Promise<BackendSessionLaunchConfig>;
   createChildThread(input: CollabManagerCreateChildThreadInput): Promise<void>;
   startChildTurn?(input: { agent: CollabAgent; message: string }): string | Promise<string>;
   onChildAgentEvent?(input: {
@@ -110,7 +112,9 @@ export class CollabManager {
   private readonly resolveParentTurnId: (parentThreadId: string) => string;
   private readonly resolveThreadHandle: (threadId: string) => string;
   private readonly resolveThreadBackendType: (threadId: string) => string;
-  private readonly createSessionLaunchConfig: (threadId: string) => BackendSessionLaunchConfig;
+  private readonly createSessionLaunchConfig: (
+    threadId: string
+  ) => BackendSessionLaunchConfig | Promise<BackendSessionLaunchConfig>;
   private readonly createChildThread: CollabManagerOptions["createChildThread"];
   private readonly startChildTurn: CollabManagerOptions["startChildTurn"];
   private readonly onChildAgentEvent: CollabManagerOptions["onChildAgentEvent"];
@@ -156,7 +160,7 @@ export class CollabManager {
       );
     }
 
-    const sessionLaunchConfig = this.createSessionLaunchConfig(threadId);
+    const sessionLaunchConfig = await this.createSessionLaunchConfig(threadId);
     const threadStart: BackendThreadStartResult | BackendThreadForkResult = req.forkContext
       ? await parentBackend.threadFork({
           threadId,
@@ -410,7 +414,7 @@ export class CollabManager {
         cwd: process.cwd(),
         model: null,
         reasoningEffort: null,
-        launchConfig: this.createSessionLaunchConfig(agent.threadId),
+        launchConfig: await this.createSessionLaunchConfig(agent.threadId),
       });
       sessionId = resumed.threadHandle;
     } catch {
@@ -419,7 +423,7 @@ export class CollabManager {
         cwd: process.cwd(),
         model: null,
         reasoningEffort: null,
-        launchConfig: this.createSessionLaunchConfig(agent.threadId),
+        launchConfig: await this.createSessionLaunchConfig(agent.threadId),
       });
       sessionId = started.threadHandle;
     }

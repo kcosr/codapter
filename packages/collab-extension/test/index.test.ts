@@ -165,4 +165,32 @@ describe("collabExtension", () => {
       await server.close();
     }
   });
+
+  it("prefers the injected available-models description when present", async () => {
+    const server = await createSocketServer((request, socket) => {
+      socket.write(`${JSON.stringify({ id: request.id, result: { echoed: request.method } })}\n`);
+    });
+    process.env.CODAPTER_COLLAB_UDS = server.socketPath;
+    process.env.CODAPTER_COLLAB_PARENT_THREAD = "thread-1";
+    process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION =
+      "Available models (use the backend-prefixed model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- codex::gpt-5.4: medium";
+
+    const tools: Array<Record<string, unknown>> = [];
+
+    try {
+      await collabExtension({
+        registerTool(tool) {
+          tools.push(tool);
+        },
+      });
+
+      const spawnTool = tools.find((tool) => tool.name === "spawn_agent");
+      expect(spawnTool).toBeDefined();
+      expect(spawnTool?.description).toContain("pi::anthropic/claude-opus-4-6");
+      expect(spawnTool?.description).toContain("codex::gpt-5.4");
+    } finally {
+      process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION = undefined;
+      await server.close();
+    }
+  });
 });

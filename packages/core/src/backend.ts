@@ -8,6 +8,7 @@ export interface Disposable {
 export interface BackendSessionLaunchConfig {
   readonly threadId?: string | null;
   readonly collabSocketPath?: string | null;
+  readonly availableModelsDescription?: string | null;
 }
 
 export interface BackendImageInput {

@@ -206,6 +206,11 @@ export class CollabClient {
 }
 
 async function fetchAvailableModelsDescription(pi: ExtensionApi): Promise<string> {
+  const embeddedDescription = process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION?.trim();
+  if (embeddedDescription) {
+    return embeddedDescription;
+  }
+
   const sources = [
     pi.listModels?.bind(pi),
     pi.backend?.listModels?.bind(pi.backend),
@@ -258,14 +263,14 @@ async function fetchAvailableModelsDescription(pi: ExtensionApi): Promise<string
         .join("\n");
 
       if (formatted) {
-        return `Available models:\n${formatted}`;
+        return `Available models (use the model id exactly as shown):\n${formatted}`;
       }
     } catch {
       // Fall through to the next model source.
     }
   }
 
-  return "Available models are determined by the active backend session.";
+  return "Available models are determined by the active backend session. When available, use the backend-prefixed model id exactly as shown, for example `pi::anthropic/claude-opus-4-6` or `codex::gpt-5.4`.";
 }
 
 function toToolResult(result: unknown) {
