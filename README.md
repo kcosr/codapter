@@ -413,49 +413,16 @@ To add a new backend, implement `IBackend` and register it in the CLI entry poin
 codapter/
 ├── packages/
 │   ├── core/                  # Protocol handling, state machines, transport
-│   │   └── src/
-│   │       ├── app-server.ts       # Main JSON-RPC handler
-│   │       ├── backend.ts          # IBackend interface & event types
-│   │       ├── collab-manager.ts   # Sub-agent collaboration orchestration
-│   │       ├── collab-uds.ts       # UDS listener for collab communication
-│   │       ├── turn-state.ts       # Turn state machine & event decomposition
-│   │       ├── thread-registry.ts  # Persistent thread storage
-│   │       ├── config-store.ts     # Config with disk persistence
-│   │       ├── command-exec.ts     # Adapter-native shell execution
-│   │       ├── jsonrpc.ts          # JSON-RPC message types
-│   │       ├── ndjson.ts           # NDJSON framing
-│   │       └── protocol.ts         # Codex protocol type helpers
 │   ├── backend-pi/            # Pi backend implementation
-│   │   └── src/
-│   │       ├── index.ts            # PiBackend class
-│   │       ├── pi-process.ts       # Pi child process management
-│   │       ├── state-store.ts      # Session-to-file mapping
-│   │       └── jsonl.ts            # JSONL line reader
 │   ├── collab-extension/      # Pi extension for sub-agent collaboration
-│   │   └── src/
-│   │       └── index.ts            # Collab tool definitions (spawn/send/wait/close)
 │   └── cli/                   # CLI entry point & transports
-│       └── src/
-│           ├── index.ts            # Listener setup (stdio/WS/UDS)
-│           └── bin.ts              # Binary entry point
-├── dist/                      # Bundled distribution
-│   └── codapter.mjs               # Single-file ESM bundle
-├── docs/                      # Documentation
-│   ├── architecture.md
-│   ├── api-mapping.md
-│   ├── backend-interface.md
-│   ├── integration.md
-│   └── bootstrap/                  # Design & planning docs
-├── scripts/
-│   ├── build-dist.mjs             # esbuild bundler
-│   ├── stdio-tap.mjs             # JSON-RPC traffic interceptor/logger
-│   ├── pi.sh                     # Pi launcher script
-│   └── codex.sh                  # Codex launcher script
-├── test/                      # Smoke tests
-├── package.json
-├── tsconfig.base.json
-└── biome.json
+├── dist/                      # Single-file ESM bundle (codapter.mjs)
+├── docs/                      # Architecture, API mapping, integration guide
+├── scripts/                   # Build, debug, and launcher scripts
+└── test/                      # Smoke / integration tests
 ```
+
+See [docs/architecture.md](docs/architecture.md) for details on how the packages relate.
 
 ## Development
 
