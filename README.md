@@ -2,7 +2,7 @@
 
 > **WIP / Prototype** — This project is an early-stage proof of concept. APIs, configuration, and behavior may change without notice. Not recommended for production use.
 
-A protocol adapter that lets the [Codex Desktop](https://developers.openai.com/codex/app) GUI work with alternative AI backends. Set `CODEX_CLI_PATH` to point at codapter, launch Codex Desktop, and your conversations are powered by the backend of your choice.
+A protocol adapter that lets clients built around the Codex app-server protocol — including [Codex Desktop](https://developers.openai.com/codex/app), the Codex CLI, and third-party applications — work with alternative AI backends. There are a growing number of well-built clients that speak this protocol; codapter lets you plug any of them into the backend of your choice.
 
 ![Codapter running inside Codex Desktop](docs/images/codex-desktop-example.png)
 
@@ -12,7 +12,7 @@ A protocol adapter that lets the [Codex Desktop](https://developers.openai.com/c
 
 ## How It Works
 
-Codapter implements the Codex app-server JSON-RPC protocol — the same wire protocol the Codex Desktop Electron app uses to talk to the official Codex CLI. The GUI connects to codapter over stdio (local) or WebSocket (remote), and codapter translates every request into the target backend's native protocol.
+Codapter implements the Codex app-server JSON-RPC protocol — the wire protocol that Codex Desktop and other clients use to communicate with a backend. Clients connect to codapter over stdio (local) or WebSocket (remote), and codapter translates every request into the target backend's native protocol.
 
 ```mermaid
 graph TB
@@ -378,27 +378,30 @@ Codapter is designed to support multiple backends through the `IBackend` interfa
 classDiagram
     class IBackend {
         <<interface>>
-        +initialize(options) Promise~void~
+        +initialize() Promise~void~
         +dispose() Promise~void~
         +isAlive() boolean
-        +createSession(cwd) Promise~BackendSession~
-        +resumeSession(sessionId, cwd) Promise~BackendSession~
-        +forkSession(sessionId) Promise~BackendSession~
+        +createSession(config?) Promise~string~
+        +resumeSession(sessionId, config?) Promise~string~
+        +forkSession(sessionId, config?) Promise~string~
         +disposeSession(sessionId) Promise~void~
         +readSessionHistory(sessionId) Promise~BackendMessage[]~
         +setSessionName(sessionId, name) Promise~void~
+        +getSessionPath(sessionId) Promise~string | null~
         +prompt(sessionId, turnId, text, images?) Promise~void~
         +abort(sessionId) Promise~void~
         +listModels() Promise~BackendModelSummary[]~
         +setModel(sessionId, modelId) Promise~void~
+        +getCapabilities() Promise~BackendCapabilities~
+        +respondToElicitation(sessionId, requestId, response) Promise~void~
         +onEvent(sessionId, listener) Disposable
     }
 
     class PiBackend {
         -processes: Map
         -stateStore: PiStateStore
-        +initialize(options)
-        +createSession(cwd)
+        +initialize()
+        +createSession(config?)
         +prompt(sessionId, turnId, text)
         ...
     }
