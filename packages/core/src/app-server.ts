@@ -470,6 +470,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+interface NativeSubAgentInfo {
+  readonly localThreadId: string;
+  readonly backendThreadId: string;
+  readonly nickname: string | null;
+}
+
 function backendEventTurnId(event: BackendAppServerEvent): string | null {
   if (!("params" in event) || !isRecord(event.params)) {
     return null;
@@ -2110,6 +2116,170 @@ export class AppServerConnection {
     return rewritten;
   }
 
+  private readNativeSubAgentNickname(
+    parentPath: string | null,
+    toolCallId: string,
+    backendThreadId: string
+  ): string | null {
+    if (!parentPath) {
+      return null;
+    }
+
+    try {
+      const lines = readFileSync(parentPath, "utf8")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const parsed = JSON.parse(lines[index] ?? "");
+        if (
+          !isRecord(parsed) ||
+          parsed.type !== "response_item" ||
+          !isRecord(parsed.payload) ||
+          parsed.payload.type !== "function_call_output" ||
+          parsed.payload.call_id !== toolCallId ||
+          typeof parsed.payload.output !== "string"
+        ) {
+          continue;
+        }
+        const output = JSON.parse(parsed.payload.output);
+        if (!isRecord(output) || output.agent_id !== backendThreadId) {
+          continue;
+        }
+        return typeof output.nickname === "string" && output.nickname.length > 0
+          ? output.nickname
+          : null;
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
+  private async ensureNativeSubAgentThreads(
+    parentThreadId: string,
+    item: Record<string, unknown>
+  ): Promise<NativeSubAgentInfo[]> {
+    const receiverThreadIds = Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    if (receiverThreadIds.length === 0) {
+      return [];
+    }
+
+    const parentEntry = await this.threadRegistry.get(parentThreadId);
+    if (!parentEntry) {
+      return [];
+    }
+
+    const prompt = typeof item.prompt === "string" ? item.prompt : "";
+    const model =
+      typeof item.model === "string"
+        ? this.backendRouter.canonicalizeModelSelection(item.model)
+        : null;
+    const reasoningEffort = typeof item.reasoningEffort === "string" ? item.reasoningEffort : null;
+    const toolCallId = typeof item.id === "string" ? item.id : "";
+    const nativeChildren: NativeSubAgentInfo[] = [];
+
+    for (const backendThreadId of receiverThreadIds) {
+      const existing = await this.threadRegistry.findByBackendSessionId(
+        backendThreadId,
+        parentEntry.backendType
+      );
+      if (existing) {
+        nativeChildren.push({
+          localThreadId: existing.threadId,
+          backendThreadId,
+          nickname: existing.agentNickname,
+        });
+        continue;
+      }
+
+      const nickname = this.readNativeSubAgentNickname(
+        parentEntry.path,
+        toolCallId,
+        backendThreadId
+      );
+      const entry = await this.threadRegistry.create({
+        backendSessionId: backendThreadId,
+        backendType: parentEntry.backendType,
+        path: null,
+        cwd: parentEntry.cwd ?? process.cwd(),
+        preview: prompt.slice(0, 120),
+        model,
+        modelProvider: parentEntry.backendType,
+        reasoningEffort,
+        name: null,
+        source: {
+          subAgent: {
+            thread_spawn: {
+              parent_thread_id: parentThreadId,
+              depth: 1,
+              agent_nickname: nickname,
+              agent_role: "default",
+            },
+          },
+        },
+        agentNickname: nickname,
+        agentRole: "default",
+        gitInfo: null,
+      });
+      const runtime = this.initRuntime(entry.threadId, entry.backendType, backendThreadId);
+      this.bindRuntimeSubscription(entry.threadId, runtime);
+      this.transitionToReady(entry.threadId, runtime);
+
+      const thread = this.buildThread(entry, []);
+      await this.publish("thread/started", { thread }, entry.threadId);
+      await this.publishThreadStatus(entry.threadId);
+
+      nativeChildren.push({
+        localThreadId: entry.threadId,
+        backendThreadId,
+        nickname,
+      });
+    }
+
+    return nativeChildren;
+  }
+
+  private rewriteNativeSubAgentToolItem(
+    parentThreadId: string,
+    item: Record<string, unknown>,
+    nativeChildren: readonly NativeSubAgentInfo[]
+  ): Record<string, unknown> {
+    const childThreadIdByBackendId = new Map(
+      nativeChildren.map((child) => [child.backendThreadId, child.localThreadId])
+    );
+    const rewritten: Record<string, unknown> = {
+      ...item,
+      senderThreadId:
+        item.senderThreadId === parentThreadId || typeof item.senderThreadId !== "string"
+          ? item.senderThreadId
+          : (childThreadIdByBackendId.get(item.senderThreadId) ?? parentThreadId),
+      receiverThreadIds: Array.isArray(item.receiverThreadIds)
+        ? item.receiverThreadIds.map((entry) =>
+            typeof entry === "string" ? (childThreadIdByBackendId.get(entry) ?? entry) : entry
+          )
+        : item.receiverThreadIds,
+      model:
+        typeof item.model === "string"
+          ? this.backendRouter.canonicalizeModelSelection(item.model)
+          : item.model,
+    };
+
+    if (isRecord(item.agentsStates)) {
+      rewritten.agentsStates = Object.fromEntries(
+        Object.entries(item.agentsStates).map(([key, value]) => [
+          childThreadIdByBackendId.get(key) ?? key,
+          value,
+        ])
+      );
+    }
+
+    return rewritten;
+  }
+
   private async rewriteBackendNotification(
     threadId: string,
     threadHandle: string,
@@ -2117,11 +2287,25 @@ export class AppServerConnection {
     params: unknown
   ): Promise<unknown> {
     const rewritten = this.rewriteBackendThreadReferences(threadId, threadHandle, params);
+    const entry = await this.threadRegistry.get(threadId);
+
+    if (
+      isRecord(rewritten) &&
+      isRecord(rewritten.item) &&
+      rewritten.item.type === "collabAgentToolCall" &&
+      entry?.backendType === "codex"
+    ) {
+      const nativeChildren =
+        rewritten.item.tool === "spawnAgent" && rewritten.item.status === "completed"
+          ? await this.ensureNativeSubAgentThreads(threadId, rewritten.item)
+          : [];
+      rewritten.item = this.rewriteNativeSubAgentToolItem(threadId, rewritten.item, nativeChildren);
+    }
+
     if (method !== "thread/started" || !isRecord(rewritten) || !isRecord(rewritten.thread)) {
       return rewritten;
     }
 
-    const entry = await this.threadRegistry.get(threadId);
     if (!entry || !isSubAgentThreadSource(entry.source)) {
       return rewritten;
     }

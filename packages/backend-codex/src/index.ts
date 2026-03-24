@@ -101,8 +101,7 @@ function rewriteInboundModelFields(value: unknown): unknown {
   const rewritten: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     if (key === "model" && typeof entry === "string") {
-      const parsed = parseBackendModelId(entry);
-      rewritten[key] = parsed ? entry : `codex::${entry}`;
+      rewritten[key] = rawModelId(entry);
       continue;
     }
     rewritten[key] = rewriteInboundModelFields(entry);

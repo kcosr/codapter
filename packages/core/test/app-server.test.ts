@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -398,6 +398,7 @@ class CodexProxyTestBackend implements IBackend {
   public readonly threadStartCalls: Array<{ model: string | null; threadId: string }> = [];
   public readonly resolvedServerRequests: Array<{ requestId: string | number; response: unknown }> =
     [];
+  constructor(private readonly threadPath = "/tmp/codex-thread.jsonl") {}
 
   async initialize() {}
   async dispose() {}
@@ -446,7 +447,7 @@ class CodexProxyTestBackend implements IBackend {
     this.threadStartCalls.push({ threadId: input.threadId, model: input.model });
     return {
       threadHandle: "codex_thread_handle",
-      path: "/tmp/codex-thread.jsonl",
+      path: this.threadPath,
       model: input.model,
       reasoningEffort: "medium",
     };
@@ -455,7 +456,7 @@ class CodexProxyTestBackend implements IBackend {
   async threadResume(input: { threadHandle: string; model: string | null }) {
     return {
       threadHandle: input.threadHandle,
-      path: "/tmp/codex-thread.jsonl",
+      path: this.threadPath,
       model: input.model,
       reasoningEffort: "medium",
     };
@@ -464,7 +465,7 @@ class CodexProxyTestBackend implements IBackend {
   async threadFork(input: { sourceThreadHandle: string; model: string | null }) {
     return {
       threadHandle: `${input.sourceThreadHandle}_fork`,
-      path: "/tmp/codex-thread-fork.jsonl",
+      path: this.threadPath,
       model: input.model,
       reasoningEffort: "medium",
     };
@@ -4770,6 +4771,172 @@ describe("AppServerConnection", () => {
       requestId: "backend-request-1",
       response: { result: { answers: {} } },
     });
+  });
+
+  it("creates local child threads for native Codex sub-agents and rewrites their ids", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-codex-native-subagent-"));
+    const sessionPath = join(directory, "parent.jsonl");
+    await writeFile(
+      sessionPath,
+      [
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call_spawn_1",
+            output: JSON.stringify({
+              agent_id: "child_backend_handle",
+              nickname: "Ptolemy",
+            }),
+          },
+        }),
+      ].join("\n"),
+      "utf8"
+    );
+
+    const outbound: Array<Record<string, unknown>> = [];
+    const backend = new CodexProxyTestBackend(sessionPath);
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+      threadRegistry,
+      onMessage(message) {
+        outbound.push(message as Record<string, unknown>);
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          cwd: "/repo",
+          model: "gpt-5.4-mini",
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        },
+      })) as { result: { thread: { id: string } } };
+      const parentThreadId = started.result.thread.id;
+
+      backend.emit("child_backend_handle", {
+        kind: "notification",
+        threadHandle: "child_backend_handle",
+        method: "thread/started",
+        params: {
+          thread: {
+            id: "child_backend_handle",
+            preview: "",
+            ephemeral: false,
+            modelProvider: "openai",
+            createdAt: 0,
+            updatedAt: 0,
+            status: { type: "idle" },
+            path: "/tmp/child-thread.jsonl",
+            cwd: "/repo",
+            cliVersion: "0.116.0",
+            source: "vscode",
+            agentNickname: null,
+            agentRole: null,
+            gitInfo: null,
+            name: null,
+            turns: [],
+          },
+        },
+      });
+
+      backend.emit("codex_thread_handle", {
+        kind: "notification",
+        threadHandle: "codex_thread_handle",
+        method: "item/completed",
+        params: {
+          threadId: "codex_thread_handle",
+          turnId: "turn_backend",
+          item: {
+            type: "collabAgentToolCall",
+            id: "call_spawn_1",
+            tool: "spawnAgent",
+            status: "completed",
+            senderThreadId: "codex_thread_handle",
+            receiverThreadIds: ["child_backend_handle"],
+            prompt: "Run the `date` command in the current workspace shell and report back.",
+            model: "gpt-5.4-mini",
+            reasoningEffort: "low",
+            agentsStates: {
+              child_backend_handle: {
+                status: "pendingInit",
+                message: null,
+              },
+            },
+          },
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const childStarted = outbound.find(
+        (message) =>
+          message.method === "thread/started" &&
+          isRecord(message.params) &&
+          isRecord(message.params.thread) &&
+          isRecord(message.params.thread.source) &&
+          "subAgent" in message.params.thread.source
+      ) as { params: { thread: { id: string; agentNickname: string | null } } } | undefined;
+      const childThreadId = childStarted?.params.thread.id ?? "";
+      expect(childThreadId).toBeTruthy();
+      expect(childThreadId).not.toBe("child_backend_handle");
+      expect(childStarted?.params.thread.agentNickname).toBe("Ptolemy");
+
+      const completed = outbound.find(
+        (message) =>
+          message.method === "item/completed" &&
+          isRecord(message.params) &&
+          isRecord(message.params.item) &&
+          message.params.item.type === "collabAgentToolCall" &&
+          message.params.item.tool === "spawnAgent"
+      ) as { params: { item: Record<string, unknown> } } | undefined;
+      expect(completed?.params.item).toMatchObject({
+        senderThreadId: parentThreadId,
+        receiverThreadIds: [childThreadId],
+        model: "gpt-5.4-mini",
+        agentsStates: {
+          [childThreadId]: {
+            status: "pendingInit",
+            message: null,
+          },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 3,
+          method: "thread/read",
+          params: {
+            threadId: childThreadId,
+            includeTurns: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 3,
+        result: {
+          thread: {
+            id: childThreadId,
+            agentNickname: "Ptolemy",
+          },
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not synthesize user message items in turn/start responses", async () => {
