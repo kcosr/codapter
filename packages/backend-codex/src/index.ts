@@ -53,6 +53,7 @@ export interface CodexBackendOptions {
   readonly cwd?: string;
   readonly transport?: "stdio" | "websocket";
   readonly websocketUrl?: string;
+  readonly stderr?: NodeJS.WritableStream | null;
 }
 
 const DEFAULT_INITIALIZE_PARAMS = {
@@ -129,6 +130,7 @@ export class CodexBackend implements IBackend {
   private readonly cwd: string;
   private readonly transport: "stdio" | "websocket";
   private readonly websocketUrl: string | null;
+  private readonly stderrSink: NodeJS.WritableStream | null;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
   private readonly eventBuffer = new BackendThreadEventBuffer();
   private readonly knownThreadHandles = new Set<string>();
@@ -138,6 +140,8 @@ export class CodexBackend implements IBackend {
   private disposed = false;
   private requestCounter = 0;
   private initError: string | null = null;
+  private recentStderr = "";
+  private processFailureHandled = false;
 
   constructor(options: CodexBackendOptions = {}) {
     this.command = options.command ?? "codex";
@@ -146,6 +150,7 @@ export class CodexBackend implements IBackend {
     this.cwd = options.cwd ?? process.cwd();
     this.transport = options.transport ?? "stdio";
     this.websocketUrl = options.websocketUrl ?? null;
+    this.stderrSink = options.stderr ?? null;
   }
 
   async initialize(): Promise<void> {
@@ -161,6 +166,8 @@ export class CodexBackend implements IBackend {
     }
 
     this.disposed = false;
+    this.processFailureHandled = false;
+    this.recentStderr = "";
     this.process = spawn(this.command, this.args as string[], {
       cwd: this.cwd,
       env: { ...process.env, ...this.env },
@@ -177,26 +184,32 @@ export class CodexBackend implements IBackend {
       this.handleLine(line);
     });
 
+    const onProcessFailure = (message: string) => {
+      this.handleProcessFailure(message);
+    };
+
+    const spawnError = new Promise<never>((_, reject) => {
+      this.process?.once("error", (error) => {
+        const wrapped = new Error(
+          `Failed to spawn Codex app-server process: ${error instanceof Error ? error.message : String(error)}`
+        );
+        onProcessFailure(wrapped.message);
+        reject(wrapped);
+      });
+    });
+
+    this.process.stderr.on("data", (chunk: string | Buffer) => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      this.appendStderr(text);
+      this.stderrSink?.write(text);
+    });
+
     this.process.once("exit", () => {
-      this.alive = false;
-      if (!this.disposed && !this.initError) {
-        this.initError = "Codex app-server process exited";
-      }
-      for (const [id, pending] of this.pending) {
-        this.pending.delete(id);
-        pending.reject(new Error(this.initError ?? "Codex backend process exited"));
-      }
-      for (const threadHandle of this.knownThreadHandles) {
-        this.eventBuffer.emit(threadHandle, {
-          kind: "disconnect",
-          threadHandle,
-          message: this.initError ?? "Codex backend process exited",
-        });
-      }
+      onProcessFailure("Codex app-server process exited");
     });
 
     try {
-      await this.sendRequest("initialize", DEFAULT_INITIALIZE_PARAMS);
+      await Promise.race([this.sendRequest("initialize", DEFAULT_INITIALIZE_PARAMS), spawnError]);
       this.sendNotification("initialized");
       this.alive = true;
       this.initialized = true;
@@ -486,6 +499,47 @@ export class CodexBackend implements IBackend {
       throw new Error("Codex process is not running");
     }
     this.process.stdin.write(`${JSON.stringify(payload)}\n`);
+  }
+
+  private appendStderr(text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+    const combined = `${this.recentStderr}${text}`;
+    this.recentStderr = combined.slice(-8_000);
+  }
+
+  private withRecentStderr(message: string): string {
+    const stderr = this.recentStderr.trim();
+    if (stderr.length === 0) {
+      return message;
+    }
+    return `${message}; recent stderr: ${stderr}`;
+  }
+
+  private handleProcessFailure(message: string): void {
+    if (this.processFailureHandled) {
+      return;
+    }
+    this.processFailureHandled = true;
+    this.alive = false;
+
+    const nextMessage = this.withRecentStderr(message);
+    if (!this.disposed && !this.initError) {
+      this.initError = nextMessage;
+    }
+
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id);
+      pending.reject(new Error(this.initError ?? nextMessage));
+    }
+    for (const threadHandle of this.knownThreadHandles) {
+      this.eventBuffer.emit(threadHandle, {
+        kind: "disconnect",
+        threadHandle,
+        message: this.initError ?? nextMessage,
+      });
+    }
   }
 
   private handleLine(line: string): void {

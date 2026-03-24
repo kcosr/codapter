@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { createCodexBackend } from "../src/index.js";
 
@@ -131,6 +132,16 @@ async function createExitOnTurnStartScript(rootDir: string): Promise<string> {
     "    }",
     "  }",
     "});",
+  ].join("\n");
+  await writeFile(scriptPath, script, "utf8");
+  return scriptPath;
+}
+
+async function createStderrExitScript(rootDir: string): Promise<string> {
+  const scriptPath = join(rootDir, "mock-codex-stderr-exit.mjs");
+  const script = [
+    "process.stderr.write('codex child failed to boot\\n');",
+    "setTimeout(() => process.exit(1), 10);",
   ].join("\n");
   await writeFile(scriptPath, script, "utf8");
   return scriptPath;
@@ -427,5 +438,38 @@ describe("CodexBackend", () => {
 
     subscription.dispose();
     await backend.dispose();
+  });
+
+  it("surfaces missing executable spawn failures clearly", async () => {
+    const backend = createCodexBackend({
+      command: "definitely-not-a-real-codex-command",
+    });
+
+    await expect(backend.initialize()).rejects.toThrow("Failed to spawn Codex app-server process");
+    expect(backend.isAlive()).toBe(false);
+    await expect(backend.dispose()).resolves.toBeUndefined();
+  });
+
+  it("drains child stderr and includes it in initialization failures", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-codex-test-"));
+    const stderr = new PassThrough();
+    const stderrChunks: string[] = [];
+    stderr.setEncoding("utf8");
+    stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    const scriptPath = await createStderrExitScript(root);
+    const backend = createCodexBackend({
+      command: "node",
+      args: [scriptPath],
+      stderr,
+    });
+
+    try {
+      await expect(backend.initialize()).rejects.toThrow("codex child failed to boot");
+      expect(stderrChunks.join("")).toContain("codex child failed to boot");
+      expect(backend.isAlive()).toBe(false);
+    } finally {
+      await backend.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

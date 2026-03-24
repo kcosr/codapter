@@ -236,7 +236,9 @@ describe("runCli", () => {
       stdin,
       stdout,
       stderr,
-      env: {},
+      env: {
+        CODAPTER_CODEX_DISABLE: "1",
+      },
     });
 
     expect(result).toEqual({ exitCode: 0 });
@@ -249,6 +251,27 @@ describe("runCli", () => {
         platformOs: expect.any(String),
       },
     });
+  });
+
+  it("fails fast on invalid CODAPTER_CODEX_TRANSPORT", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stderrChunks: string[] = [];
+    stderr.setEncoding("utf8");
+    stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+    const result = await runCli(["app-server"], {
+      stdin: Readable.from([]),
+      stdout,
+      stderr,
+      env: {
+        CODAPTER_PI_DISABLE: "1",
+        CODAPTER_CODEX_TRANSPORT: "banana",
+      },
+    });
+
+    expect(result).toEqual({ exitCode: 1 });
+    expect(stderrChunks.join("")).toContain("Invalid CODAPTER_CODEX_TRANSPORT: banana");
   });
 
   it("does not block later stdio requests behind a slow request", async () => {
@@ -285,7 +308,9 @@ describe("runCli", () => {
         stdin,
         stdout,
         stderr,
-        env: {},
+        env: {
+          CODAPTER_CODEX_DISABLE: "1",
+        },
       });
 
       stdin.write(

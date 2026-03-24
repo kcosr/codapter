@@ -30,6 +30,20 @@ function envFlagEnabled(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+function parseCodexTransport(value: string | undefined): "stdio" | "websocket" | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || normalized === "stdio") {
+    return "stdio";
+  }
+  if (normalized === "websocket") {
+    return "websocket";
+  }
+  throw new Error(`Invalid CODAPTER_CODEX_TRANSPORT: ${value}`);
+}
+
 export interface CliEnvironment {
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
@@ -216,13 +230,13 @@ export async function runCli(
         }
         codexArgs = parsedArgs;
       }
+      const codexTransport = parseCodexTransport(env.CODAPTER_CODEX_TRANSPORT);
       const codexBackend = createCodexBackend({
         ...(env.CODAPTER_CODEX_COMMAND ? { command: env.CODAPTER_CODEX_COMMAND } : {}),
         ...(codexArgs ? { args: codexArgs } : {}),
-        ...(env.CODAPTER_CODEX_TRANSPORT === "websocket"
-          ? { transport: "websocket" as const }
-          : {}),
+        ...(codexTransport ? { transport: codexTransport } : {}),
         ...(env.CODAPTER_CODEX_WS_URL ? { websocketUrl: env.CODAPTER_CODEX_WS_URL } : {}),
+        stderr,
       });
       codexBackends.push(codexBackend);
       backends.push(codexBackend);
