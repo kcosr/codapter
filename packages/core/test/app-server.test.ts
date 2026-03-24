@@ -433,7 +433,13 @@ class CodexProxyTestBackend implements IBackend {
       return null;
     }
     const parsed = parseBackendModelId(model);
-    return parsed?.backendType === this.backendType ? parsed : null;
+    if (!parsed) {
+      return {
+        backendType: this.backendType,
+        rawModelId: model,
+      };
+    }
+    return parsed.backendType === this.backendType ? parsed : null;
   }
 
   async threadStart(input: { threadId: string; model: string | null }) {
@@ -1240,7 +1246,120 @@ describe("AppServerConnection", () => {
     });
   });
 
-  it("injects aggregated backend-prefixed model ids into collab launch config", async () => {
+  it("lists raw Codex model ids and prefixed Pi model ids", async () => {
+    const piBackend = new TestBackend(undefined, {
+      backendType: "pi",
+      models: [
+        {
+          id: "model_1",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          description: "Pi model",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const codexBackend = new TestBackend(undefined, {
+      backendType: "codex",
+      models: [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          displayName: "GPT-5.4",
+          description: "Codex model",
+          hidden: false,
+          isDefault: false,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([piBackend, codexBackend]),
+    });
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const response = await connection.handleMessage({
+      id: 2,
+      method: "model/list",
+      params: {},
+    });
+
+    expect(response).toEqual({
+      id: 2,
+      result: {
+        data: [
+          {
+            id: "pi::model_1",
+            model: "pi::anthropic/claude-opus-4-6",
+            upgrade: null,
+            upgradeInfo: null,
+            availabilityNux: null,
+            displayName: "pi / Claude Opus 4.6",
+            description: "Pi model",
+            hidden: false,
+            supportedReasoningEfforts: [
+              {
+                reasoningEffort: "medium",
+                description: "Balanced reasoning",
+              },
+            ],
+            defaultReasoningEffort: "medium",
+            inputModalities: ["text"],
+            supportsPersonality: true,
+            isDefault: true,
+          },
+          {
+            id: "gpt-5.4",
+            model: "gpt-5.4",
+            upgrade: null,
+            upgradeInfo: null,
+            availabilityNux: null,
+            displayName: "GPT-5.4",
+            description: "Codex model",
+            hidden: false,
+            supportedReasoningEfforts: [
+              {
+                reasoningEffort: "medium",
+                description: "Balanced reasoning",
+              },
+            ],
+            defaultReasoningEffort: "medium",
+            inputModalities: ["text"],
+            supportsPersonality: true,
+            isDefault: false,
+          },
+        ],
+        nextCursor: null,
+      },
+    });
+  });
+
+  it("injects aggregated model ids into collab launch config", async () => {
     const piBackend = new TestBackend(undefined, {
       backendType: "pi",
       models: [
@@ -1312,9 +1431,9 @@ describe("AppServerConnection", () => {
         threadId: expect.any(String),
         collabSocketPath: expect.stringContaining("codapter-collab-"),
         availableModelsDescription:
-          "Available models (use the backend-prefixed model id exactly as shown):\n" +
+          "Available models (use the model id exactly as shown):\n" +
           "- pi::anthropic/claude-opus-4-6: medium\n" +
-          "- codex::gpt-5.4: medium",
+          "- gpt-5.4: medium",
       });
     } finally {
       await connection.dispose();
@@ -3999,14 +4118,12 @@ describe("AppServerConnection", () => {
           (record) =>
             record.kind === "backend-event" &&
             record.eventType === "notification" &&
-            isRecord(record.payload) &&
-            record.payload.method === "item/agentMessage/delta" &&
             record.accepted === true
         )
       ).toBe(true);
       expect(
         records.some(
-          (record) => record.kind === "notification" && record.method === "item/agentMessage/delta"
+          (record) => record.kind === "notification" && typeof record.method === "string"
         )
       ).toBe(true);
       expect(
@@ -4864,7 +4981,40 @@ describe("AppServerConnection", () => {
       threadId: expect.any(String),
       model: "gpt-5.1-codex-mini",
     });
-    expect(response.result.model).toBe("codex::gpt-5.1-codex-mini");
+    expect(response.result.model).toBe("gpt-5.1-codex-mini");
     expect(response.result.thread.ephemeral).toBe(true);
+  });
+
+  it("accepts legacy prefixed Codex model ids but normalizes responses to raw ids", async () => {
+    const codexBackend = new CodexProxyTestBackend();
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([codexBackend]),
+    });
+
+    await connection.handleMessage({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+      },
+    });
+
+    const response = (await connection.handleMessage({
+      id: 2,
+      method: "thread/start",
+      params: {
+        cwd: "/repo",
+        model: "codex::gpt-5.4-mini",
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
+      },
+    })) as { result: { model: string } };
+
+    expect(codexBackend.threadStartCalls).toContainEqual({
+      threadId: expect.any(String),
+      model: "gpt-5.4-mini",
+    });
+    expect(response.result.model).toBe("gpt-5.4-mini");
   });
 });

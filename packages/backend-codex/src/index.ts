@@ -224,7 +224,13 @@ export class CodexBackend implements IBackend {
       return null;
     }
     const parsed = parseBackendModelId(model);
-    if (!parsed || parsed.backendType !== this.backendType) {
+    if (!parsed) {
+      return {
+        backendType: this.backendType,
+        rawModelId: model,
+      };
+    }
+    if (parsed.backendType !== this.backendType) {
       return null;
     }
     return parsed;

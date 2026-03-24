@@ -1,6 +1,8 @@
 import type { BackendModelSummary, IBackend, ParsedBackendSelection } from "./backend.js";
 import { encodeBackendModelId, parseBackendModelId } from "./backend.js";
 
+const NATIVE_BACKEND_TYPE = "codex";
+
 interface AggregatedModelEntry extends BackendModelSummary {
   readonly backendType: string;
 }
@@ -14,12 +16,20 @@ function cloneModel(model: BackendModelSummary): BackendModelSummary {
 }
 
 function toAggregatedModel(backendType: string, model: BackendModelSummary): AggregatedModelEntry {
-  const prefixedId = encodeBackendModelId(backendType, model.id);
+  const exposedId =
+    backendType === NATIVE_BACKEND_TYPE ? model.id : encodeBackendModelId(backendType, model.id);
+  const exposedModel =
+    backendType === NATIVE_BACKEND_TYPE
+      ? model.model
+      : encodeBackendModelId(backendType, model.model);
   return {
     ...cloneModel(model),
-    id: prefixedId,
-    model: encodeBackendModelId(backendType, model.model),
-    displayName: `${backendType} / ${model.displayName}`,
+    id: exposedId,
+    model: exposedModel,
+    displayName:
+      backendType === NATIVE_BACKEND_TYPE
+        ? model.displayName
+        : `${backendType} / ${model.displayName}`,
     isDefault: model.isDefault,
     backendType,
   };
@@ -71,7 +81,18 @@ export class BackendRouter {
 
     const prefixed = parseBackendModelId(model);
     if (!prefixed) {
-      return null;
+      const codexBackend = this.getBackend(NATIVE_BACKEND_TYPE);
+      if (!codexBackend) {
+        return null;
+      }
+      const parsed = codexBackend.parseModelSelection(model);
+      if (!parsed) {
+        return null;
+      }
+      return {
+        backend: codexBackend,
+        selection: parsed,
+      };
     }
 
     const backend = this.getBackend(prefixed.backendType);
@@ -88,6 +109,23 @@ export class BackendRouter {
       backend,
       selection: parsed,
     };
+  }
+
+  toClientModelId(backendType: string, rawModelId: string): string {
+    return backendType === NATIVE_BACKEND_TYPE
+      ? rawModelId
+      : encodeBackendModelId(backendType, rawModelId);
+  }
+
+  canonicalizeModelSelection(model: string | null | undefined): string | null {
+    if (!model) {
+      return null;
+    }
+    const parsed = this.parseModelSelection(model);
+    if (!parsed) {
+      return model;
+    }
+    return this.toClientModelId(parsed.selection.backendType, parsed.selection.rawModelId);
   }
 
   async listModels(): Promise<BackendModelSummary[]> {

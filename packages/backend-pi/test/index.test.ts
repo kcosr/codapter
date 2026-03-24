@@ -635,7 +635,7 @@ describe("PiBackend", () => {
         threadId: "thread-parent-123",
         collabSocketPath: "/tmp/codapter-collab-test.sock",
         availableModelsDescription:
-          "Available models (use the backend-prefixed model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- codex::gpt-5.4: medium",
+          "Available models (use the model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- gpt-5.4: medium",
       });
     } finally {
       await backend.dispose();
@@ -650,7 +650,7 @@ describe("PiBackend", () => {
     expect(launch.collabSocketPath).toBe("/tmp/codapter-collab-test.sock");
     expect(launch.parentThreadId).toBe("thread-parent-123");
     expect(launch.availableModelsDescription).toContain("pi::anthropic/claude-opus-4-6");
-    expect(launch.availableModelsDescription).toContain("codex::gpt-5.4");
+    expect(launch.availableModelsDescription).toContain("gpt-5.4");
     expect(launch.argv).toContain("--extension");
     expect(launch.argv).toContain(extensionPath);
   });

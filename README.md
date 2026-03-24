@@ -127,7 +127,7 @@ Current routed lifecycle:
 
 1. Client initializes the app-server connection (`initialize`, `initialized`).
 2. `model/list` is aggregated across healthy registered backends (`BackendRouter`).
-3. `thread/start` resolves the selected backend from prefixed model id (`pi::...`, `codex::...`).
+3. `thread/start` resolves the selected backend from the chosen model id. Pi models remain prefixed (`pi::...`); unprefixed ids route to Codex, and legacy `codex::...` ids are still accepted.
 4. Thread metadata is stored in the registry with `{ backendType, backendSessionId }`.
 5. `turn/start` routes to the owning backend thread handle.
 6. Backend notifications/server-requests are relayed to the client through `AppServerConnection`.

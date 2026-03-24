@@ -76,7 +76,7 @@ Environment override:
 
 Codapter routes thread and turn operations through `BackendRouter` into registered `IBackend` implementations.
 
-- Model ids in picker responses are backend-prefixed (`pi::...`, `codex::...`).
+- Model ids in picker responses are backend-routed: Pi entries are prefixed (`pi::...`), while Codex entries use raw native ids like `gpt-5.4`.
 - Thread ownership is persisted in the registry as `{ backendType, backendSessionId }`.
 - Pi session state is persisted under `~/.local/share/codapter/backend-pi/` by default.
 - Pi subprocesses are spawned on demand and shut down with the adapter.

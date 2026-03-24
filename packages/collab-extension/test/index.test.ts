@@ -173,7 +173,7 @@ describe("collabExtension", () => {
     process.env.CODAPTER_COLLAB_UDS = server.socketPath;
     process.env.CODAPTER_COLLAB_PARENT_THREAD = "thread-1";
     process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION =
-      "Available models (use the backend-prefixed model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- codex::gpt-5.4: medium";
+      "Available models (use the model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- gpt-5.4: medium";
 
     const tools: Array<Record<string, unknown>> = [];
 
@@ -187,7 +187,7 @@ describe("collabExtension", () => {
       const spawnTool = tools.find((tool) => tool.name === "spawn_agent");
       expect(spawnTool).toBeDefined();
       expect(spawnTool?.description).toContain("pi::anthropic/claude-opus-4-6");
-      expect(spawnTool?.description).toContain("codex::gpt-5.4");
+      expect(spawnTool?.description).toContain("gpt-5.4");
     } finally {
       process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION = undefined;
       await server.close();

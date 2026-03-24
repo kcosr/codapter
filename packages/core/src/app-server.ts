@@ -949,12 +949,12 @@ export class AppServerConnection {
     collaborationMode?: JsonValue | null,
     persistedModel?: string | null
   ): string | null {
-    return (
+    const model =
       requestedModel ??
       resolveCollaborationModeSetting(collaborationMode, "model") ??
       persistedModel ??
-      this.readEffectiveConfig(cwd).model
-    );
+      this.readEffectiveConfig(cwd).model;
+    return this.backendRouter.canonicalizeModelSelection(model);
   }
 
   private resolveRequestedReasoningEffort(
@@ -1193,10 +1193,10 @@ export class AppServerConnection {
       reasoningEffort: effectiveReasoningEffort,
       launchConfig: await this.createBackendSessionLaunchConfig(threadId),
     });
-    const selectedModel =
-      effectiveModel && parseBackendModelId(effectiveModel)
-        ? effectiveModel
-        : `${selection.selection.backendType}::${selection.selection.rawModelId}`;
+    const selectedModel = this.backendRouter.toClientModelId(
+      selection.selection.backendType,
+      selection.selection.rawModelId
+    );
 
     const entry = await this.threadRegistry.create({
       threadId,
@@ -2330,7 +2330,7 @@ export class AppServerConnection {
       return null;
     }
 
-    return `Available models (use the backend-prefixed model id exactly as shown):\n${lines.join("\n")}`;
+    return `Available models (use the model id exactly as shown):\n${lines.join("\n")}`;
   }
 
   private async createCollabChildThread(input: CollabManagerCreateChildThreadInput): Promise<void> {

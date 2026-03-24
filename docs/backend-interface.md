@@ -17,7 +17,7 @@
 
 ## Model Routing
 
-- Adapter-facing model ids are backend-prefixed: `"<backendType>::<rawModelId>"`.
+- Adapter-facing model ids are backend-routed. Pi models use `"<backendType>::<rawModelId>"`, while Codex is treated as native and uses raw model ids like `"gpt-5.4"`. Legacy `codex::...` ids remain accepted on input.
 - `parseBackendModelId()` parses routed ids; `encodeBackendModelId()` writes them.
 - `BackendRouter.listModels()` aggregates healthy backend model lists and exposes a single aggregated default model.
 - `BackendRouter.resolveModelSelection()` resolves the owning backend and raw backend model id.

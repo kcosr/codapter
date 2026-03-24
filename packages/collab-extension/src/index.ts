@@ -270,7 +270,7 @@ async function fetchAvailableModelsDescription(pi: ExtensionApi): Promise<string
     }
   }
 
-  return "Available models are determined by the active backend session. When available, use the backend-prefixed model id exactly as shown, for example `pi::anthropic/claude-opus-4-6` or `codex::gpt-5.4`.";
+  return "Available models are determined by the active backend session. When available, use the model id exactly as shown, for example `pi::anthropic/claude-opus-4-6` or `gpt-5.4`.";
 }
 
 function toToolResult(result: unknown) {
