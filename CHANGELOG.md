@@ -7,6 +7,7 @@
 ### Added
 
 - Added Codex smoke coverage (`test/smoke/codex.smoke.test.ts`) and expanded Codex backend unit coverage for thread lifecycle and disconnect-event paths. ([#000](<pr-url>))
+- Added a long-lived GUI parity audit plan in `docs/testing/gui-audit.md` plus client-payload smoke coverage for active child-thread resume/open flows. ([#000](<pr-url>))
 
 ### Changed
 
@@ -17,6 +18,8 @@
 ### Fixed
 
 - Fixed adapter identity version reporting by aligning `ADAPTER_VERSION` with the package version (`0.0.3`). ([#000](<pr-url>))
+- Fixed Pi-backed active child-thread resume to deduplicate the live child prompt when the child tab is opened before completion, so Codex Desktop no longer shows the same input twice. ([#000](<pr-url>))
+- Fixed Codex backend process startup handling to surface missing-executable spawn failures cleanly, drain child stderr, include recent stderr in startup failures, and reject invalid `CODAPTER_CODEX_TRANSPORT` values instead of silently falling back. ([#000](<pr-url>))
 
 ### Removed
 
