@@ -71,11 +71,13 @@ export interface CollabManagerCreateChildThreadInput {
 
 export interface CollabThreadExecutionContext {
   readonly cwd: string;
+  readonly model: string | null;
   readonly approvalPolicy: string | null;
   readonly approvalsReviewer: string | null;
   readonly sandbox: SandboxMode | null;
   readonly sandboxPolicy: JsonValue | null;
   readonly config: { [key: string]: JsonValue | undefined } | null;
+  readonly reasoningEffort: string | null;
   readonly serviceTier: string | null;
   readonly serviceName: string | null;
   readonly baseInstructions: string | null;
@@ -224,9 +226,9 @@ export class CollabManager {
         });
     const backendType = (useBackendFork ? parentBackend : childBackend).backendType;
     const threadHandle = threadStart.threadHandle;
-    const selectedModel =
-      req.model ??
-      (modelSelection ? `${backendType}::${modelSelection.selection.rawModelId}` : null);
+    const selectedModel = modelSelection
+      ? this.backendRouter.toClientModelId(backendType, modelSelection.selection.rawModelId)
+      : (req.model ?? null);
 
     try {
       await this.createChildThread({
@@ -241,7 +243,7 @@ export class CollabManager {
         depth,
         preview: req.message.slice(0, 120),
         model: selectedModel,
-        reasoningEffort: req.reasoningEffort ?? null,
+        reasoningEffort: threadStart.reasoningEffort ?? req.reasoningEffort ?? null,
       });
 
       const agent: CollabAgent = {
@@ -672,17 +674,21 @@ export class CollabManager {
 
     try {
       const backend = this.requireBackend(runtime.backendType);
-      const context =
-        this.resolveThreadExecutionContext(agent.threadId) ??
-        this.resolveThreadExecutionContext(agent.parentThreadId);
+      const childContext = this.resolveThreadExecutionContext(agent.threadId);
+      const parentContext = this.resolveThreadExecutionContext(agent.parentThreadId);
+      const context = childContext ?? parentContext;
+      const selectedModel = childContext?.model
+        ? (this.backendRouter.parseModelSelection(childContext.model)?.selection.rawModelId ??
+          childContext.model)
+        : null;
       await backend.turnStart({
         threadId: agent.threadId,
         threadHandle: agent.sessionId,
         turnId: runtime.activeTurnId,
         cwd: context?.cwd ?? process.cwd(),
         input: [{ type: "text", text: message, text_elements: [] }],
-        model: null,
-        reasoningEffort: null,
+        model: selectedModel,
+        reasoningEffort: childContext?.reasoningEffort ?? null,
         approvalPolicy: context?.approvalPolicy ?? null,
         approvalsReviewer: context?.approvalsReviewer ?? null,
         sandboxPolicy: context?.sandboxPolicy ?? null,

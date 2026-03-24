@@ -54,8 +54,9 @@ npm run gui:audit:collect -- \
 The collector copies the raw logs and writes:
 
 1. `summary.json` with normalized GUI-facing request/response/notification sequences,
-2. `metadata.json` with the captured inputs,
-3. `raw/` with the original stdio and debug logs.
+2. `summary.json.sessions[]` with normalized native Codex session transcript summaries when `--session-log` is provided,
+3. `metadata.json` with the captured inputs,
+4. `raw/` with the original stdio and debug logs.
 
 When a routed run diverges from native Codex on the same scenario, compare the normalized summaries directly:
 
@@ -158,11 +159,30 @@ rg -n 'spawn_agent|wait_agent|fork_context|function_call_output|task_complete' \
   ~/.codex/sessions/$(date +%Y/%m/%d)/rollout-*.jsonl
 ```
 
+Then include the relevant parent and child transcripts in the collected artifact:
+
+```bash
+npm run gui:audit:collect -- \
+  --scenario routed-codex \
+  --artifact-dir /tmp/codapter-gui-audit \
+  --stdio-log /tmp/codapter-stdio.log \
+  --debug-log /tmp/codapter.jsonl \
+  --session-log ~/.codex/sessions/$(date +%Y/%m/%d)/rollout-<parent>.jsonl \
+  --session-log ~/.codex/sessions/$(date +%Y/%m/%d)/rollout-<child>.jsonl
+```
+
 Those transcripts are the fastest way to distinguish:
 
 1. model-planning variance,
 2. backend child-session failure,
 3. adapter/client rendering failure.
+
+Use the transcript summaries to compare:
+
+1. the actual `spawn_agent` arguments selected by the parent (`agent_type`, `fork_context`, `model`, `reasoning_effort`, `message`),
+2. the `wait_agent` ids and returned completion payload,
+3. whether the child transcript reached a final answer and `task_complete`,
+4. whether the child transcript stalled immediately after a tool `function_call_output`.
 
 ## Shared Checks
 

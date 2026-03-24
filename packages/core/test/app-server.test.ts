@@ -2131,6 +2131,23 @@ describe("AppServerConnection", () => {
         },
       })) as { result: { thread: { id: string } } };
 
+      await connection.handleMessage({
+        id: 21,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "Spawn child", text_elements: [] }],
+          collaborationMode: {
+            mode: "default",
+            settings: {
+              model: "gpt-5.4-mini",
+              reasoning_effort: "low",
+              developer_instructions: "collab developer instructions",
+            },
+          },
+        },
+      });
+
       const socketPath = connection.collabSocketPath;
       expect(socketPath).toBeTruthy();
 
@@ -2164,6 +2181,8 @@ describe("AppServerConnection", () => {
       });
       expect(backend.turnStartCalls.at(-1)).toMatchObject({
         cwd: "/repo",
+        model: "gpt-5.4-mini",
+        reasoningEffort: "medium",
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
         sandboxPolicy: {
@@ -2171,6 +2190,140 @@ describe("AppServerConnection", () => {
         },
         serviceTier: "auto",
         personality: "friendly",
+        collaborationMode: {
+          mode: "default",
+          settings: {
+            model: "gpt-5.4-mini",
+            reasoning_effort: "medium",
+            developer_instructions: "collab developer instructions",
+          },
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rewrites collab child collaborationMode to the child backend model on cross-backend spawns", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-collab-cross-backend-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const piBackend = new TestBackend(undefined, {
+      backendType: "pi",
+      models: [
+        {
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          description: "Pi test model",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const codexBackend = new TestBackend(undefined, {
+      backendType: "codex",
+      models: [
+        {
+          id: "gpt-5.4-mini",
+          model: "gpt-5.4-mini",
+          displayName: "GPT-5.4 Mini",
+          description: "Codex test model",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([piBackend, codexBackend]),
+      collabEnabled: true,
+      threadRegistry,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const started = (await connection.handleMessage({
+        id: 2,
+        method: "thread/start",
+        params: {
+          model: "pi::anthropic/claude-opus-4-6",
+          cwd: "/repo",
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+        },
+      })) as { result: { thread: { id: string } } };
+
+      await connection.handleMessage({
+        id: 3,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [{ type: "text", text: "Spawn child", text_elements: [] }],
+          collaborationMode: {
+            mode: "default",
+            settings: {
+              model: "pi::anthropic/claude-opus-4-6",
+              reasoning_effort: "medium",
+            },
+          },
+        },
+      });
+
+      const socketPath = connection.collabSocketPath;
+      expect(socketPath).toBeTruthy();
+
+      await callSocket(socketPath ?? "", {
+        id: 4,
+        method: "collab/spawn",
+        params: {
+          parentThreadId: started.result.thread.id,
+          message: "Run date",
+          model: "gpt-5.4-mini",
+          reasoning_effort: "medium",
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(codexBackend.threadStartCalls.at(-1)).toMatchObject({
+        model: "gpt-5.4-mini",
+      });
+      expect(codexBackend.turnStartCalls.at(-1)).toMatchObject({
+        model: "gpt-5.4-mini",
+        reasoningEffort: "medium",
+        collaborationMode: {
+          mode: "default",
+          settings: {
+            model: "gpt-5.4-mini",
+            reasoning_effort: "medium",
+          },
+        },
       });
     } finally {
       await connection.dispose();

@@ -181,11 +181,13 @@ interface PendingBackendServerRequest {
 
 interface ThreadExecutionContext {
   readonly cwd: string;
+  readonly model: string | null;
   readonly approvalPolicy: string | null;
   readonly approvalsReviewer: string | null;
   readonly sandbox: SandboxMode | null;
   readonly sandboxPolicy: JsonValue | null;
   readonly config: { [key: string]: JsonValue | undefined } | null;
+  readonly reasoningEffort: string | null;
   readonly serviceTier: string | null;
   readonly serviceName: string | null;
   readonly baseInstructions: string | null;
@@ -248,6 +250,40 @@ function resolveCollaborationModeSetting(
   }
   const settings = (collaborationMode as Record<string, unknown>).settings;
   return readStringRecordValue(settings, key);
+}
+
+function rewriteCollaborationModeSettings(
+  collaborationMode: JsonValue | null,
+  options: {
+    model: string | null;
+    reasoningEffort: string | null;
+  }
+): JsonValue | null {
+  if (typeof collaborationMode !== "object" || collaborationMode === null) {
+    return collaborationMode;
+  }
+
+  const mode = collaborationMode as Record<string, JsonValue | undefined>;
+  const settings: Record<string, JsonValue | undefined> = isRecord(mode.settings)
+    ? { ...(mode.settings as Record<string, JsonValue | undefined>) }
+    : {};
+
+  if (options.model) {
+    settings.model = options.model;
+  } else {
+    settings.model = undefined;
+  }
+
+  if (options.reasoningEffort) {
+    settings.reasoning_effort = options.reasoningEffort;
+  } else {
+    settings.reasoning_effort = undefined;
+  }
+
+  return {
+    ...mode,
+    settings,
+  };
 }
 
 function createIdentity(): AppServerIdentity {
@@ -1261,11 +1297,13 @@ export class AppServerConnection {
     const thread = this.buildThread(entry, []);
     this.recordThreadExecutionContext(entry.threadId, {
       cwd: parsed.cwd ?? process.cwd(),
+      model: entry.model,
       approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
       approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
       sandbox: parsed.sandbox ?? null,
       sandboxPolicy: buildSandboxPolicy(parsed.sandbox ?? null, parsed.cwd ?? process.cwd()),
       config: parsed.config ?? null,
+      reasoningEffort: entry.reasoningEffort,
       serviceTier: parsed.serviceTier ?? null,
       serviceName: parsed.serviceName ?? null,
       baseInstructions: parsed.baseInstructions ?? null,
@@ -1390,11 +1428,13 @@ export class AppServerConnection {
       const thread = this.buildThread(entry, turns);
       this.recordThreadExecutionContext(entry.threadId, {
         cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+        model: entry.model,
         approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
         approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
         sandbox: parsed.sandbox ?? null,
         sandboxPolicy: buildSandboxPolicy(parsed.sandbox ?? null, parsed.cwd ?? thread.cwd),
         config: parsed.config ?? null,
+        reasoningEffort: entry.reasoningEffort,
         serviceTier: parsed.serviceTier ?? null,
         serviceName: null,
         baseInstructions: parsed.baseInstructions ?? null,
@@ -1518,6 +1558,7 @@ export class AppServerConnection {
       const thread = this.buildThread(entry, turns);
       this.recordThreadExecutionContext(entry.threadId, {
         cwd: parsed.cwd ?? sourceEntry.cwd ?? process.cwd(),
+        model: entry.model,
         approvalPolicy: parsed.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
         approvalsReviewer: parsed.approvalsReviewer ?? DEFAULT_APPROVALS_REVIEWER,
         sandbox: parsed.sandbox ?? null,
@@ -1526,6 +1567,7 @@ export class AppServerConnection {
           parsed.cwd ?? sourceEntry.cwd ?? process.cwd()
         ),
         config: parsed.config ?? null,
+        reasoningEffort: entry.reasoningEffort,
         serviceTier: parsed.serviceTier ?? null,
         serviceName: null,
         baseInstructions: parsed.baseInstructions ?? null,
@@ -1794,6 +1836,7 @@ export class AppServerConnection {
     const existingExecutionContext = this.cloneThreadExecutionContext(parsed.threadId);
     this.recordThreadExecutionContext(parsed.threadId, {
       cwd: parsed.cwd ?? entry.cwd ?? process.cwd(),
+      model: entry.model,
       approvalPolicy:
         parsed.approvalPolicy ??
         existingExecutionContext?.approvalPolicy ??
@@ -1811,6 +1854,7 @@ export class AppServerConnection {
           parsed.cwd ?? entry.cwd ?? process.cwd()
         ),
       config: existingExecutionContext?.config ?? null,
+      reasoningEffort: entry.reasoningEffort,
       serviceTier: parsed.serviceTier ?? existingExecutionContext?.serviceTier ?? null,
       serviceName: existingExecutionContext?.serviceName ?? null,
       baseInstructions: existingExecutionContext?.baseInstructions ?? null,
@@ -2830,7 +2874,15 @@ export class AppServerConnection {
     const runtime = this.createRuntime(entry.threadId, input.backendType, input.threadHandle, true);
     this.transitionToReady(entry.threadId, runtime);
     if (parentContext) {
-      this.recordThreadExecutionContext(entry.threadId, parentContext);
+      this.recordThreadExecutionContext(entry.threadId, {
+        ...parentContext,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+        collaborationMode: rewriteCollaborationModeSettings(parentContext.collaborationMode, {
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+        }),
+      });
     }
 
     const thread = this.buildThread(entry, []);
