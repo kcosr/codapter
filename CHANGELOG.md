@@ -6,20 +6,21 @@
 
 ### Added
 
-- Added Codex smoke coverage (`test/smoke/codex.smoke.test.ts`) and expanded Codex backend unit coverage for thread lifecycle and disconnect-event paths. ([#000](<pr-url>))
-- Added a long-lived GUI parity audit plan in `docs/testing/gui-audit.md` plus client-payload smoke coverage for active child-thread resume/open flows. ([#000](<pr-url>))
+- Added Codex smoke coverage (`test/smoke/codex.smoke.test.ts`) and expanded Codex backend unit coverage for thread lifecycle and disconnect-event paths. ([#6](https://github.com/kcosr/codapter/pull/6))
+- Added a long-lived GUI parity audit plan in `docs/testing/gui-audit.md` plus client-payload smoke coverage for active child-thread resume/open flows. ([#6](https://github.com/kcosr/codapter/pull/6))
 
 ### Changed
 
-- Refactored codapter to a routed multi-backend architecture, added the Codex stdio proxy backend, and made sub-agent routing backend-aware for Pi parent -> Codex child flows. ([#000](<pr-url>))
-- Aligned README/integration/API-mapping/onboarding docs with the routed Pi+Codex backend contract, corrected adapter identity defaults in docs, and updated smoke test guidance/scripts to include Codex smoke coverage. ([#000](<pr-url>))
-- Renamed the local Codex Desktop launcher from `scripts/pi.sh` to `scripts/codapter.sh` and updated onboarding/debug-log references to the new script and log paths. ([#000](<pr-url>))
+- Refactored codapter to a routed multi-backend architecture, added the Codex stdio proxy backend, and made sub-agent routing backend-aware for Pi parent -> Codex child flows. ([#6](https://github.com/kcosr/codapter/pull/6))
+- Aligned README/integration/API-mapping/onboarding docs with the routed Pi+Codex backend contract, corrected adapter identity defaults in docs, and updated smoke test guidance/scripts to include Codex smoke coverage. ([#6](https://github.com/kcosr/codapter/pull/6))
+- Renamed the local Codex Desktop launcher from `scripts/pi.sh` to `scripts/codapter.sh` and updated onboarding/debug-log references to the new script and log paths. ([#6](https://github.com/kcosr/codapter/pull/6))
 
 ### Fixed
 
-- Fixed adapter identity version reporting by aligning `ADAPTER_VERSION` with the package version (`0.0.3`). ([#000](<pr-url>))
-- Fixed Pi-backed active child-thread resume to deduplicate the live child prompt when the child tab is opened before completion, so Codex Desktop no longer shows the same input twice. ([#000](<pr-url>))
-- Fixed Codex backend process startup handling to surface missing-executable spawn failures cleanly, drain child stderr, include recent stderr in startup failures, and reject invalid `CODAPTER_CODEX_TRANSPORT` values instead of silently falling back. ([#000](<pr-url>))
+- Fixed adapter identity version reporting by aligning `ADAPTER_VERSION` with the package version (`0.0.3`). ([#6](https://github.com/kcosr/codapter/pull/6))
+- Fixed Pi-backed active child-thread resume to deduplicate the live child prompt when the child tab is opened before completion, so Codex Desktop no longer shows the same input twice. ([#6](https://github.com/kcosr/codapter/pull/6))
+- Fixed Codex backend process startup handling to surface missing-executable spawn failures cleanly, drain child stderr, include recent stderr in startup failures, and reject invalid `CODAPTER_CODEX_TRANSPORT` values instead of silently falling back. ([#6](https://github.com/kcosr/codapter/pull/6))
+- Fixed routed Codex child title fallback to keep live child opens untitled until the generated title arrives, while still recovering the nickname on resume paths. ([#6](https://github.com/kcosr/codapter/pull/6))
 
 ### Removed
 

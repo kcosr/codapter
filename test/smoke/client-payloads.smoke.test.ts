@@ -722,7 +722,7 @@ describe("client payload smoke", () => {
             path: expect.stringContaining("codex-child-backfill.jsonl"),
             agentNickname: "Euler",
             agentRole: "default",
-            name: "Euler",
+            name: null,
             modelProvider: "codex",
           },
         },
