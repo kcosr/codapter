@@ -8,7 +8,6 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 export CODAPTER_COLLAB_EXTENSION_PATH="$ROOT_DIR/packages/collab-extension/dist/index.js"
 export CODAPTER_COLLAB=true
 export CODAPTER_DEBUG_LOG_FILE=/tmp/codapter.jsonl
-export CODAPTER_PI_STATIC_MODELS_FILE="${CODAPTER_PI_STATIC_MODELS_FILE:-$ROOT_DIR/test/fixtures/pi-static-models.json}"
 export CODEX_CLI_PATH="$ROOT_DIR/scripts/stdio-tap.mjs"
 
 export TAP_LOG=/tmp/codapter-stdio.log

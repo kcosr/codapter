@@ -15,6 +15,14 @@ function cloneModel(model: BackendModelSummary): BackendModelSummary {
   };
 }
 
+function cloneModelListResult(result: BackendModelListResult): BackendModelListResult {
+  return {
+    models: result.models.map(cloneModel),
+    diagnostics: result.diagnostics.map((entry) => ({ ...entry })),
+    totalDurationMs: result.totalDurationMs,
+  };
+}
+
 function toAggregatedModel(backendType: string, model: BackendModelSummary): AggregatedModelEntry {
   const exposedId =
     backendType === NATIVE_BACKEND_TYPE ? model.id : encodeBackendModelId(backendType, model.id);
@@ -57,6 +65,8 @@ export interface BackendModelListResult {
 export class BackendRouter {
   private readonly backends = new Map<string, IBackend>();
   private readonly backendOrder: string[] = [];
+  private modelListPromise: Promise<BackendModelListResult> | null = null;
+  private modelListCache: BackendModelListResult | null = null;
 
   constructor(backends: readonly IBackend[] = []) {
     for (const backend of backends) {
@@ -143,6 +153,24 @@ export class BackendRouter {
   }
 
   async listModelsDetailed(): Promise<BackendModelListResult> {
+    if (this.modelListCache) {
+      return cloneModelListResult(this.modelListCache);
+    }
+    if (this.modelListPromise) {
+      return cloneModelListResult(await this.modelListPromise);
+    }
+
+    this.modelListPromise = this.loadModelsDetailed();
+    try {
+      const result = await this.modelListPromise;
+      this.modelListCache = result;
+      return cloneModelListResult(result);
+    } finally {
+      this.modelListPromise = null;
+    }
+  }
+
+  private async loadModelsDetailed(): Promise<BackendModelListResult> {
     const startedAt = Date.now();
     const candidates: AggregatedModelEntry[] = [];
     const diagnostics: BackendModelListDiagnostic[] = [];
@@ -213,6 +241,25 @@ export class BackendRouter {
 
   async listModels(): Promise<BackendModelSummary[]> {
     return (await this.listModelsDetailed()).models;
+  }
+
+  async getDefaultModelId(): Promise<string | null> {
+    const models = await this.listModels();
+    return (
+      models.find((entry) => entry.isDefault)?.id ??
+      models.find((entry) => !entry.hidden)?.id ??
+      null
+    );
+  }
+
+  async hasAvailableModel(model: string | null | undefined): Promise<boolean> {
+    const canonicalModel = this.canonicalizeModelSelection(model);
+    if (!canonicalModel) {
+      return false;
+    }
+
+    const models = await this.listModels();
+    return models.some((entry) => entry.id === canonicalModel || entry.model === canonicalModel);
   }
 
   async resolveModelSelection(model: string | null | undefined): Promise<RoutedBackendSelection> {

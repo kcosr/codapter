@@ -289,6 +289,60 @@ async function createMockPiScript(rootDir: string): Promise<string> {
   return scriptPath;
 }
 
+async function createModelProbeScript(rootDir: string): Promise<string> {
+  const scriptPath = join(rootDir, "mock-pi-models-only.mjs");
+  const script = [
+    "import { writeFile } from 'node:fs/promises';",
+    "import { StringDecoder } from 'node:string_decoder';",
+    "",
+    "const capturePath = process.env.CODAPTER_CAPTURE_PROCESS_PATH;",
+    "const decoder = new StringDecoder('utf8');",
+    "let buffer = '';",
+    "",
+    "if (capturePath) {",
+    "  await writeFile(capturePath, `${process.pid}\\n`, { flag: 'a' });",
+    "}",
+    "",
+    "function write(value) {",
+    "  process.stdout.write(JSON.stringify(value) + '\\n');",
+    "}",
+    "",
+    "function response(id, command, data) {",
+    "  write({ id, type: 'response', command, success: true, ...(data === undefined ? {} : { data }) });",
+    "}",
+    "",
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += decoder.write(chunk);",
+    "  const lines = buffer.split('\\n');",
+    "  buffer = lines.pop() ?? '';",
+    "  for (const line of lines) {",
+    "    if (!line.trim()) continue;",
+    "    const command = JSON.parse(line);",
+    "    if (command.type === 'get_state') {",
+    "      response(command.id, 'get_state', {",
+    "        sessionId: 'models-only',",
+    "        sessionFile: null,",
+    "        sessionName: null,",
+    "        model: { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
+    "      });",
+    "      continue;",
+    "    }",
+    "    if (command.type === 'get_available_models') {",
+    "      setTimeout(() => {",
+    "        response(command.id, 'get_available_models', {",
+    "          models: [",
+    "            { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
+    "          ],",
+    "        });",
+    "      }, 50);",
+    "    }",
+    "  }",
+    "});",
+  ];
+  await writeFile(scriptPath, `${script.join("\n")}\n`, "utf8");
+  return scriptPath;
+}
+
 async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 3000): Promise<T> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -647,6 +701,45 @@ describe("PiBackend", () => {
           defaultReasoningEffort: "medium",
         }),
       ]);
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes concurrent available-model probes into a single Pi process launch", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-model-dedupe-"));
+    const sessionDir = join(rootDir, "sessions");
+    const capturePath = join(rootDir, "model-probes.log");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createModelProbeScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath],
+      env: {
+        ...process.env,
+        CODAPTER_CAPTURE_PROCESS_PATH: capturePath,
+      },
+    });
+
+    try {
+      await backend.initialize();
+      const [first, second] = await Promise.all([backend.listModels(), backend.listModels()]);
+      expect(first).toEqual(second);
+      expect(first).toEqual([
+        expect.objectContaining({
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+        }),
+      ]);
+
+      const launches = (await readFile(capturePath, "utf8"))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      expect(launches).toHaveLength(1);
     } finally {
       await backend.dispose();
       await rm(rootDir, { recursive: true, force: true });

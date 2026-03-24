@@ -35,6 +35,7 @@ class TestBackend implements IBackend {
     response: unknown;
   }> = [];
   public readonly setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+  public listModelsCallCount = 0;
   public readonly launchConfigs: Array<{
     threadId: string;
     launchConfig: BackendSessionLaunchConfig | undefined;
@@ -145,6 +146,7 @@ class TestBackend implements IBackend {
   }
 
   async listModels() {
+    this.listModelsCallCount += 1;
     return this.models;
   }
 
@@ -1011,53 +1013,188 @@ describe("AppServerConnection", () => {
   });
 
   it("writes config values and reads them back", async () => {
-    const connection = new AppServerConnection();
-    await connection.handleMessage({
-      id: 1,
-      method: "initialize",
-      params: {
-        clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
-        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
-      },
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-config-write-"));
+    const configPath = join(directory, "config.toml");
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([
+        new TestBackend(undefined, {
+          backendType: "pi",
+          models: [
+            {
+              id: "anthropic/claude-opus-4-6",
+              model: "anthropic/claude-opus-4-6",
+              displayName: "Claude Opus 4.6",
+              description: "Claude Opus 4.6",
+              hidden: false,
+              isDefault: true,
+              inputModalities: ["text", "image"],
+              supportedReasoningEfforts: [
+                {
+                  reasoningEffort: "medium",
+                  description: "Balanced reasoning",
+                },
+              ],
+              defaultReasoningEffort: "medium",
+              supportsPersonality: true,
+            },
+          ],
+        }),
+      ]),
+      configStore: new InMemoryConfigStore(configPath),
     });
-
-    const writeResponse = await connection.handleMessage({
-      id: 2,
-      method: "config/value/write",
-      params: {
-        keyPath: "model",
-        value: "pi::gpt-5.4-mini",
-        mergeStrategy: "replace",
-        expectedVersion: "1",
-      },
-    });
-    const readResponse = await connection.handleMessage({
-      id: 3,
-      method: "config/read",
-      params: { includeLayers: true },
-    });
-
-    expect(writeResponse).toMatchObject({
-      id: 2,
-      result: {
-        status: "ok",
-        version: "2",
-        filePath: expect.any(String),
-      },
-    });
-    expect(readResponse).toMatchObject({
-      id: 3,
-      result: {
-        config: {
-          model: "pi::gpt-5.4-mini",
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
         },
-        layers: [
-          {
-            version: "2",
+      });
+
+      const writeResponse = await connection.handleMessage({
+        id: 2,
+        method: "config/value/write",
+        params: {
+          keyPath: "model",
+          value: "pi::anthropic/claude-opus-4-6",
+          mergeStrategy: "replace",
+          expectedVersion: "1",
+        },
+      });
+      const readResponse = await connection.handleMessage({
+        id: 3,
+        method: "config/read",
+        params: { includeLayers: true },
+      });
+
+      expect(writeResponse).toMatchObject({
+        id: 2,
+        result: {
+          status: "ok",
+          version: "2",
+          filePath: expect.any(String),
+        },
+      });
+      expect(readResponse).toMatchObject({
+        id: 3,
+        result: {
+          config: {
+            model: "pi::anthropic/claude-opus-4-6",
           },
-        ],
-      },
+          layers: [
+            {
+              version: "2",
+            },
+          ],
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("sanitizes unavailable configured models from config/read responses", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-app-server-config-invalid-"));
+    const configPath = join(directory, "config.toml");
+    await writeFile(
+      configPath,
+      'model = "pi::gpt-5.4-mini"\nmodel_reasoning_effort = "medium"\n',
+      "utf8"
+    );
+
+    const piBackend = new TestBackend(undefined, {
+      backendType: "pi",
+      models: [
+        {
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          description: "Claude Opus 4.6",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text", "image"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: false,
+        },
+      ],
     });
+    const codexBackend = new TestBackend(undefined, {
+      backendType: "codex",
+      models: [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          displayName: "GPT-5.4",
+          description: "Latest frontier agentic coding model.",
+          hidden: false,
+          isDefault: true,
+          inputModalities: ["text", "image"],
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "medium",
+              description: "Balanced reasoning",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          supportsPersonality: true,
+        },
+      ],
+    });
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([piBackend, codexBackend]),
+      configStore: new InMemoryConfigStore(configPath),
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const firstRead = await connection.handleMessage({
+        id: 2,
+        method: "config/read",
+        params: { includeLayers: false, cwd: "/Users/kcassidy/codapter" },
+      });
+      const secondRead = await connection.handleMessage({
+        id: 3,
+        method: "config/read",
+        params: { includeLayers: false, cwd: "/Users/kcassidy/codapter" },
+      });
+
+      expect(firstRead).toMatchObject({
+        id: 2,
+        result: {
+          config: {
+            model: "gpt-5.4",
+            model_reasoning_effort: "medium",
+          },
+        },
+      });
+      expect(secondRead).toMatchObject({
+        id: 3,
+        result: {
+          config: {
+            model: "gpt-5.4",
+          },
+        },
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("uses persisted config model for thread start and resume when request model is omitted", async () => {

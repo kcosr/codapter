@@ -412,6 +412,7 @@ export class PiBackend implements IBackend {
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly modelCache = new Map<string, BackendModelSummary>();
+  private modelListPromise: Promise<BackendModelSummary[]> | null = null;
   private readonly launchConfigs = new Map<string, BackendSessionLaunchConfig>();
   private readonly eventBuffer = new BackendThreadEventBuffer();
   private readonly threadRuntimes = new Map<string, PiThreadRuntime>();
@@ -475,6 +476,7 @@ export class PiBackend implements IBackend {
 
     this.sessions.clear();
     this.modelCache.clear();
+    this.modelListPromise = null;
     for (const runtime of this.threadRuntimes.values()) {
       runtime.processSubscription?.dispose();
     }
@@ -771,26 +773,15 @@ export class PiBackend implements IBackend {
       return cloneModels([...this.modelCache.values()]);
     }
 
-    if (this.staticAvailableModelsPath) {
-      const summaries = await this.loadStaticModels(this.staticAvailableModelsPath);
-      this.modelCache.clear();
-      for (const model of summaries) {
-        this.modelCache.set(model.id, model);
-      }
-      return cloneModels(summaries);
+    if (this.modelListPromise) {
+      return cloneModels(await this.modelListPromise);
     }
 
-    const probe = this.createProcess(`models:${randomUUID()}`);
     try {
-      const models = await probe.getAvailableModels();
-      const summaries = mapAvailableModelsToSummaries(models);
-      this.modelCache.clear();
-      for (const model of summaries) {
-        this.modelCache.set(model.id, model);
-      }
-      return cloneModels(summaries);
+      this.modelListPromise = this.loadAvailableModels();
+      return cloneModels(await this.modelListPromise);
     } finally {
-      await probe.dispose().catch(() => {});
+      this.modelListPromise = null;
     }
   }
 
@@ -1070,6 +1061,31 @@ export class PiBackend implements IBackend {
         ? parsed.models
         : [];
     return mapAvailableModelsToSummaries(models);
+  }
+
+  private async loadAvailableModels(): Promise<BackendModelSummary[]> {
+    if (this.staticAvailableModelsPath) {
+      const summaries = await this.loadStaticModels(this.staticAvailableModelsPath);
+      this.replaceModelCache(summaries);
+      return summaries;
+    }
+
+    const probe = this.createProcess(`models:${randomUUID()}`);
+    try {
+      const models = await probe.getAvailableModels();
+      const summaries = mapAvailableModelsToSummaries(models);
+      this.replaceModelCache(summaries);
+      return summaries;
+    } finally {
+      await probe.dispose().catch(() => {});
+    }
+  }
+
+  private replaceModelCache(models: readonly BackendModelSummary[]): void {
+    this.modelCache.clear();
+    for (const model of models) {
+      this.modelCache.set(model.id, model);
+    }
   }
 }
 

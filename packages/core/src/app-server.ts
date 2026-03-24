@@ -715,7 +715,7 @@ export class AppServerConnection {
 
       switch (request.method) {
         case "config/read":
-          return success(request.id, this.handleConfigRead(request.params));
+          return success(request.id, await this.handleConfigRead(request.params));
         case "config/value/write":
           return success(request.id, this.handleConfigValueWrite(request.params));
         case "config/batchWrite":
@@ -984,12 +984,13 @@ export class AppServerConnection {
     };
   }
 
-  private handleConfigRead(params: unknown): ConfigReadResponse {
+  private async handleConfigRead(params: unknown): Promise<ConfigReadResponse> {
     const parsed = (params ?? {}) as Partial<ConfigReadParams>;
-    return this.configStore.read({
+    const response = this.configStore.read({
       includeLayers: Boolean(parsed.includeLayers),
       cwd: typeof parsed.cwd === "string" ? parsed.cwd : null,
     });
+    return await this.sanitizeConfigReadResponse(response);
   }
 
   private handleConfigValueWrite(params: unknown): ConfigWriteResponse {
@@ -1002,6 +1003,63 @@ export class AppServerConnection {
 
   private readEffectiveConfig(cwd: string | null): ConfigReadResponse["config"] {
     return this.configStore.read({ includeLayers: false, cwd }).config;
+  }
+
+  private async sanitizeConfigReadResponse(
+    response: ConfigReadResponse
+  ): Promise<ConfigReadResponse> {
+    const configuredModel = response.config.model;
+    if (!configuredModel) {
+      return response;
+    }
+
+    const canonicalModel = this.backendRouter.canonicalizeModelSelection(configuredModel);
+    if (await this.backendRouter.hasAvailableModel(canonicalModel ?? configuredModel)) {
+      if (canonicalModel && canonicalModel !== configuredModel) {
+        return {
+          ...response,
+          config: {
+            ...response.config,
+            model: canonicalModel,
+          },
+        };
+      }
+      return response;
+    }
+
+    const fallbackModel = await this.selectFallbackConfigModel(configuredModel);
+    return {
+      ...response,
+      config: {
+        ...response.config,
+        model: fallbackModel,
+      },
+    };
+  }
+
+  private async selectFallbackConfigModel(configuredModel: string): Promise<string | null> {
+    const models = await this.backendRouter.listModels();
+    const codexPreferredModel =
+      models.find((entry) => entry.id === "gpt-5.4" || entry.model === "gpt-5.4")?.id ?? null;
+    const defaultModel =
+      codexPreferredModel ??
+      models.find((entry) => entry.isDefault)?.id ??
+      models.find((entry) => !entry.hidden)?.id ??
+      null;
+    if (!defaultModel) {
+      return null;
+    }
+
+    const parsedModel = parseBackendModelId(
+      this.backendRouter.canonicalizeModelSelection(configuredModel) ?? configuredModel
+    );
+    if (!parsedModel) {
+      return defaultModel;
+    }
+    if (parsedModel.backendType === "pi" && !parsedModel.rawModelId.includes("/")) {
+      return defaultModel;
+    }
+    return defaultModel;
   }
 
   private resolveRequestedModel(
