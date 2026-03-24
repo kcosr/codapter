@@ -1505,7 +1505,10 @@ export class AppServerConnection {
         });
         this.bindRuntimeSubscription(parsed.threadId, runtime);
       }
-      entry = (await this.syncCanonicalThreadRead(parsed.threadId, readResult)) ?? entry;
+      entry =
+        (await this.syncCanonicalThreadRead(parsed.threadId, readResult, {
+          allowRecoveredNicknameNameFallback: true,
+        })) ?? entry;
       const turns = this.normalizeReadTurns(entry, [...readResult.turns]);
       this.reconcileLoadedTurnIds(parsed.threadId, turns);
       const resumedActiveTurnId = collabRuntimeState?.activeTurnId ?? existingActiveTurnId;
@@ -2700,7 +2703,10 @@ export class AppServerConnection {
 
   private async syncCanonicalThreadRead(
     threadId: string,
-    readResult: BackendThreadReadResult
+    readResult: BackendThreadReadResult,
+    options: {
+      allowRecoveredNicknameNameFallback?: boolean;
+    } = {}
   ): Promise<ThreadRegistryEntry | null> {
     const entry = await this.threadRegistry.get(threadId);
     if (!entry) {
@@ -2729,6 +2735,7 @@ export class AppServerConnection {
       typeof readResult.title === "string" && readResult.title.trim().length > 0
         ? readResult.title.trim()
         : null;
+    const allowRecoveredNicknameNameFallback = options.allowRecoveredNicknameNameFallback ?? false;
 
     let source = entry.source;
     if (isSubAgentThreadSource(entry.source)) {
@@ -2746,7 +2753,9 @@ export class AppServerConnection {
     const name =
       backendTitle ??
       entry.name ??
-      (preserveExistingSubAgentIdentity && typeof agentNickname === "string"
+      (allowRecoveredNicknameNameFallback &&
+      preserveExistingSubAgentIdentity &&
+      typeof agentNickname === "string"
         ? agentNickname
         : null);
 

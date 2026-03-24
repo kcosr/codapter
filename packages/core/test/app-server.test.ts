@@ -6193,7 +6193,7 @@ describe("AppServerConnection", () => {
             path: childSessionPath,
             agentNickname: "Euler",
             agentRole: "default",
-            name: "Euler",
+            name: null,
             source: {
               subAgent: {
                 thread_spawn: {
@@ -6327,7 +6327,7 @@ describe("AppServerConnection", () => {
             id: childThreadId,
             agentNickname: "Ptolemy",
             agentRole: "default",
-            name: "Ptolemy",
+            name: null,
             source: {
               subAgent: {
                 thread_spawn: {
@@ -6473,6 +6473,110 @@ describe("AppServerConnection", () => {
       await expect(threadRegistry.get(childThreadId)).resolves.toMatchObject({
         name: "Check system date",
         agentNickname: "Ptolemy",
+      });
+    } finally {
+      await connection.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the recovered routed child nickname as a fallback name during resume only", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-codex-child-resume-name-"));
+    const childSessionPath = join(directory, "child.jsonl");
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    await writeFile(
+      childSessionPath,
+      `${JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "child_backend_handle",
+          agent_nickname: "Euler",
+          agent_role: "default",
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: "parent-thread",
+                depth: 1,
+                agent_nickname: "Euler",
+                agent_role: "default",
+              },
+            },
+          },
+        },
+      })}\n`,
+      "utf8"
+    );
+
+    const backend = new CodexProxyTestBackend(childSessionPath);
+    backend.threadReadOverrides.set("child_backend_handle", {
+      path: childSessionPath,
+      cwd: "/repo",
+      agentNickname: null,
+      agentRole: null,
+    });
+
+    const entry = await threadRegistry.create({
+      threadId: "child-thread",
+      backendSessionId: "child_backend_handle",
+      backendType: "codex",
+      cwd: "/repo",
+      preview: "Run date",
+      model: "gpt-5.4-mini",
+      modelProvider: "codex",
+      reasoningEffort: "medium",
+      name: null,
+      source: {
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: "parent-thread",
+            depth: 1,
+            agent_nickname: "Euler",
+            agent_role: "default",
+          },
+        },
+      },
+      agentNickname: null,
+      agentRole: null,
+      gitInfo: null,
+      path: childSessionPath,
+    });
+
+    const connection = new AppServerConnection({
+      backendRouter: new BackendRouter([backend]),
+      threadRegistry,
+      onMessage() {},
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 2,
+          method: "thread/resume",
+          params: {
+            threadId: entry.threadId,
+            persistExtendedHistory: false,
+          },
+        })
+      ).resolves.toMatchObject({
+        id: 2,
+        result: {
+          thread: {
+            id: entry.threadId,
+            path: childSessionPath,
+            agentNickname: "Euler",
+            agentRole: "default",
+            name: "Euler",
+          },
+        },
       });
     } finally {
       await connection.dispose();
