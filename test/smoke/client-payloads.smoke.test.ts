@@ -127,6 +127,63 @@ async function createMockPiTranscriptScript(
   return { scriptPath, sessionDir };
 }
 
+async function createMockPiActiveResumeScript(
+  rootDir: string
+): Promise<{ scriptPath: string; sessionDir: string }> {
+  const sessionDir = join(rootDir, "pi-active-sessions");
+  await mkdir(sessionDir, { recursive: true });
+  const scriptPath = join(rootDir, "mock-pi-active-resume.mjs");
+  const script = [
+    "import { StringDecoder } from 'node:string_decoder';",
+    "import { join } from 'node:path';",
+    "",
+    "const decoder = new StringDecoder('utf8');",
+    "const sessionDir = process.argv[2] ?? process.cwd();",
+    "let buffer = '';",
+    "let promptCounter = 0;",
+    "const sessionFile = join(sessionDir, 'pi-active-session.jsonl');",
+    "const availableModels = [",
+    "  { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text'], contextWindow: 200000 },",
+    "];",
+    "const state = { model: availableModels[0], history: [], sessionId: 'pi-active-session', sessionFile };",
+    "",
+    "function write(value) { process.stdout.write(JSON.stringify(value) + '\\n'); }",
+    "function response(id, command, data) { write({ id, type: 'response', command, success: true, ...(data === undefined ? {} : { data }) }); }",
+    "",
+    "function emitPrompt(message) {",
+    "  promptCounter += 1;",
+    "  const suffix = String(promptCounter);",
+    "  const userMessage = { id: 'user-' + suffix, role: 'user', content: [{ type: 'text', text: message }], timestamp: Date.now() };",
+    "  state.history.push(userMessage);",
+    "}",
+    "",
+    "function handle(payload) {",
+    "  if (payload.type === 'get_state') { response(payload.id, 'get_state', { sessionId: state.sessionId, sessionFile: state.sessionFile, model: state.model }); return; }",
+    "  if (payload.type === 'new_session') { response(payload.id, 'new_session', { cancelled: false }); return; }",
+    "  if (payload.type === 'switch_session') { response(payload.id, 'switch_session', { cancelled: false }); return; }",
+    "  if (payload.type === 'set_model') { response(payload.id, 'set_model', { model: state.model }); return; }",
+    "  if (payload.type === 'get_available_models') { response(payload.id, 'get_available_models', { models: availableModels }); return; }",
+    "  if (payload.type === 'get_messages') { response(payload.id, 'get_messages', { messages: state.history }); return; }",
+    "  if (payload.type === 'get_session_stats') { response(payload.id, 'get_session_stats', { sessionId: state.sessionId, sessionFile: state.sessionFile, userMessages: state.history.length, assistantMessages: 0, toolCalls: 0, toolResults: 0, totalMessages: state.history.length, tokens: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 }, cost: 0 }); return; }",
+    "  if (payload.type === 'prompt') { response(payload.id, 'prompt'); emitPrompt(payload.message); return; }",
+    "  if (payload.type === 'abort') { response(payload.id, 'abort'); return; }",
+    "  if (payload.type === 'extension_ui_response') { response(payload.id, 'extension_ui_response'); return; }",
+    "}",
+    "",
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += decoder.write(chunk);",
+    "  const lines = buffer.split('\\n');",
+    "  buffer = lines.pop() ?? '';",
+    "  for (const line of lines) {",
+    "    if (!line.trim()) continue;",
+    "    handle(JSON.parse(line));",
+    "  }",
+    "});",
+  ].join("\n");
+  await writeFile(scriptPath, script, "utf8");
+  return { scriptPath, sessionDir };
+}
+
 async function createMockCodexSubagentScript(rootDir: string): Promise<string> {
   const sessionPath = join(rootDir, "codex-parent.jsonl");
   await writeFile(
@@ -288,6 +345,87 @@ describe("client payload smoke", () => {
       );
       expect(JSON.stringify(resumedTurn)).not.toContain('"role":"toolResult"');
       expect(JSON.stringify(resumedTurn)).not.toContain('"type":"toolCall"');
+    } finally {
+      await connection.dispose();
+      await backend.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes the visible child prompt when Pi thread resume happens mid-turn", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codapter-client-pi-active-"));
+    const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
+    const notifications: NotificationMessage[] = [];
+    const { scriptPath, sessionDir } = await createMockPiActiveResumeScript(directory);
+    const backend = createPiBackend({
+      command: "node",
+      args: [scriptPath, sessionDir],
+      sessionDir,
+    });
+    await backend.initialize();
+    const connection = await initConnection(
+      new BackendRouter([backend]),
+      threadRegistry,
+      notifications
+    );
+
+    try {
+      const started = (await connection.handleMessage({
+        id: 20,
+        method: "thread/start",
+        params: {
+          experimentalRawEvents: false,
+          persistExtendedHistory: false,
+          cwd: "/Users/kcassidy/codapter",
+          modelProvider: "pi",
+          model: "pi::anthropic/claude-opus-4-6",
+        },
+      })) as { result: { thread: { id: string } } };
+
+      await connection.handleMessage({
+        id: 21,
+        method: "turn/start",
+        params: {
+          threadId: started.result.thread.id,
+          input: [
+            {
+              type: "text",
+              text: "Run the `date` command and report the output.",
+              text_elements: [],
+            },
+          ],
+        },
+      });
+
+      const resumed = (await connection.handleMessage({
+        id: 22,
+        method: "thread/resume",
+        params: {
+          threadId: started.result.thread.id,
+          persistExtendedHistory: false,
+        },
+      })) as {
+        result: {
+          thread: {
+            turns: Array<{
+              status: string;
+              items: Array<{ type: string; content?: unknown }>;
+            }>;
+          };
+        };
+      };
+
+      expect(resumed.result.thread.turns).toHaveLength(1);
+      expect(resumed.result.thread.turns[0]?.status).toBe("inProgress");
+      const resumedUserMessages = resumed.result.thread.turns[0]?.items.filter(
+        (item) =>
+          item.type === "userMessage" &&
+          JSON.stringify(item.content) ===
+            JSON.stringify([
+              { type: "text", text: "Run the `date` command and report the output." },
+            ])
+      );
+      expect(resumedUserMessages).toHaveLength(1);
     } finally {
       await connection.dispose();
       await backend.dispose();

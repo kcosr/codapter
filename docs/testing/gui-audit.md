@@ -289,6 +289,21 @@ Expected:
 2. The original thread remains unchanged.
 3. The fork starts from the selected anchor, not from an unrelated turn.
 
+### S8. Open active child thread while it is still running
+
+Steps:
+
+1. Spawn one child that runs a deliberately slow command such as `sleep 8 && date`.
+2. While the child is still shown as running, expand the parent’s child list.
+3. Open the child from the sidebar or the parent’s background-agent panel before it completes.
+
+Expected:
+
+1. The child thread shows exactly one copy of the child input prompt.
+2. The child thread remains `active` and continues streaming to completion.
+3. Returning to the parent preserves the parent-only collab summary items.
+4. Reopening the child after completion does not introduce a second copy of that same prompt.
+
 ## Codex Baseline Suite
 
 Run with `./scripts/codex.sh`.
@@ -331,7 +346,7 @@ Run with `./scripts/codapter.sh` and select a raw Codex model.
 
 ### RC1. Parity against native baseline
 
-Run `S1` through `S7`.
+Run `S1` through `S8`.
 
 Expected:
 
@@ -372,13 +387,23 @@ Expected:
 3. Reopening the child does not duplicate the earlier turn.
 4. The parent receives a visible child-result summary after the follow-up completes.
 
+### RC4. Open routed Codex child while active
+
+Run `S8` with a raw Codex child model.
+
+Expected:
+
+1. Opening the active child does not duplicate the child input.
+2. The child keeps streaming after the tab switch.
+3. The child completes without wedging the parent or the rest of the app.
+
 ## Routed Pi Suite
 
 Run with `./scripts/codapter.sh` and select `pi / Claude Opus 4.6`.
 
 ### RP1. Routed Pi baseline
 
-Run `S1` through `S7`.
+Run `S1` through `S8`.
 
 Expected:
 
@@ -415,6 +440,16 @@ Expected:
 2. The child thread shows the Codex-native model label.
 3. The parent and child transcripts stay separated.
 4. No raw serialized tool payloads leak into the child transcript.
+
+### RP4. Open routed Pi child while active
+
+Run `S8` with a Pi child.
+
+Expected:
+
+1. Opening the active child does not duplicate the child prompt.
+2. The child thread stays active and finishes normally.
+3. Reopening after completion still shows one copy of the child prompt and one rendered result.
 
 ## Comparison Checklist
 
