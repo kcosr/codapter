@@ -4,9 +4,10 @@
 
 ## Scope
 
-- `IBackend` owns model/session lifecycle and turn streaming.
+- `IBackend` owns backend-thread lifecycle and turn streaming.
+- `BackendRouter` owns model-id routing across multiple backends.
 - `command/exec` is adapter-native and intentionally excluded.
-- Session identifiers are opaque backend-owned values. The adapter stores them as metadata but does not derive meaning from them.
+- Backend thread handles are opaque backend-owned values. The adapter stores them as metadata but does not derive meaning from them.
 
 ## Lifecycle
 
@@ -14,52 +15,45 @@
 - `dispose()`: release backend resources on shutdown.
 - `isAlive()`: health check for routing and shutdown decisions.
 
-## Session Methods
+## Model Routing
 
-- `createSession()`: start a new backend session.
-- `resumeSession(sessionId)`: reconnect to an existing backend session.
-- `forkSession(sessionId)`: clone an existing session and return a new opaque session id.
-- `disposeSession(sessionId)`: release backend-side session state.
-- `readSessionHistory(sessionId)`: return persisted messages for `thread/read` hydration.
-- `setSessionName(sessionId, name)`: persist a user-visible session name.
-- `getSessionPath(sessionId)`: return the backend-owned filesystem path for a session, or null.
+- Adapter-facing model ids are backend-routed. Pi models use `"<backendType>::<rawModelId>"`, while Codex is treated as native and uses raw model ids like `"gpt-5.4"`. Legacy `codex::...` ids remain accepted on input.
+- `parseBackendModelId()` parses routed ids; `encodeBackendModelId()` writes them.
+- `BackendRouter.listModels()` aggregates healthy backend model lists and exposes a single aggregated default model.
+- `BackendRouter.resolveModelSelection()` resolves the owning backend and raw backend model id.
+
+## Thread Methods
+
+- `threadStart(input)`: create a backend thread handle for a new adapter thread.
+- `threadResume(input)`: reconnect an adapter thread to an existing backend handle.
+- `threadFork(input)`: fork from a source backend handle and return a new backend handle.
+- `threadRead(input)`: return backend-normalized `Turn[]` for adapter `thread/read`.
+- `threadArchive(input)`: archive backend state for the thread.
+- `threadSetName(input)`: persist backend thread name.
 
 ## Turn Methods
 
-- `prompt(sessionId, turnId, text, images?)`: start a turn for a session.
-- `abort(sessionId)`: interrupt the active turn for a session.
-- `respondToElicitation(sessionId, requestId, response)`: resolve a prior `elicitation_request` event.
+- `turnStart(input)`: begin a turn for a thread handle.
+- `turnInterrupt(input)`: interrupt the active turn for a thread handle.
+- `resolveServerRequest(input)`: send a response for an outstanding backend-originated server request.
 
-## Model / Capability Methods
+## App-Server Event Contract
 
-- `listModels()`: returns backend models for `model/list`.
-- `setModel(sessionId, modelId)`: change the active model for a session.
-- `getCapabilities()`: stable feature flags used by the adapter when shaping requests or events.
+`IBackend.onEvent(threadHandle, listener)` emits `BackendAppServerEvent` values:
 
-## Event Contract
+- `notification`: backend thread notification (`method`, `params`).
+- `serverRequest`: backend-originated server request (`requestId`, `method`, `params`).
+- `error`: non-fatal backend/proxy error (`code`, `message`, `retryable`).
+- `disconnect`: backend transport/thread disconnect.
 
-Every `BackendEvent` carries:
-- `sessionId`
-- `turnId`
+`BackendThreadEventBuffer` in `backend.ts` provides queue-before-subscribe semantics so early backend events are not dropped while runtime listeners are being bound.
 
-Correlation fields required by specific variants:
-- `tool_start`, `tool_update`, `tool_end`: `toolCallId`
-- `tool_update`: `isCumulative`
-- `elicitation_request`: `requestId`
-- `token_usage`: `usage`
+## Legacy Pi Turn-Event Types
 
-Terminal semantics:
-- `message_end` marks the end of streamed assistant output for a turn.
-- `tool_end` marks the terminal state for one tool call.
-- `error` is terminal for the current backend action unless the backend documents otherwise.
-
-Delta semantics:
-- `text_delta` and `thinking_delta` are append-only deltas.
-- `tool_update.isCumulative = true` means the payload is the full tool output so far and the adapter must diff it before emitting protocol deltas.
-- `tool_update.isCumulative = false` means the payload is already a pure delta.
+`backend.ts` still exports `BackendEvent` (`text_delta`, `thinking_delta`, `tool_*`, `message_end`, etc.) for Pi normalization helpers. This is separate from the routed `BackendAppServerEvent` contract above.
 
 ## Adapter Expectations
 
-- Backends must not emit events for the wrong `turnId`; the adapter uses `turnId` for stale-event gating.
-- Backends must keep `toolCallId` stable for the life of a tool invocation.
-- Backends must not require file-path knowledge from the adapter; all resume/fork operations use opaque ids.
+- Backends must route all events by the exact `threadHandle` associated with that runtime.
+- Backends must support deterministic failure for invalid handles/models.
+- Backends must treat `threadHandle` as opaque and avoid adapter-specific assumptions.

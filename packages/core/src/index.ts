@@ -1,5 +1,6 @@
 export * from "./app-server.js";
 export * from "./backend.js";
+export * from "./backend-router.js";
 export * from "./collab-uds.js";
 export * from "./collab-manager.js";
 export * from "./collab-nicknames.js";

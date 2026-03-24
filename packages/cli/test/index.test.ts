@@ -2,6 +2,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 import { PassThrough, Readable } from "node:stream";
 import { createPiBackend } from "@codapter/backend-pi";
+import { AppServerConnection, BackendRouter } from "@codapter/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import {
@@ -65,12 +66,54 @@ function waitForWebSocketMessage(websocket: WebSocket): Promise<unknown> {
 async function startListeners(listenTargets: readonly string[]) {
   const backend = createPiBackend();
   await backend.initialize();
-  const listeners = await startAppServerListeners(listenTargets, { backend });
+  const listeners = await startAppServerListeners(listenTargets, {
+    backendRouter: new BackendRouter([backend]),
+  });
   return {
     listeners,
     async close() {
       await listeners.close();
       await backend.dispose();
+    },
+  };
+}
+
+function createNdjsonCollector(stream: PassThrough) {
+  const messages = new Map<string | number, unknown>();
+  const waiters = new Map<string | number, (message: unknown) => void>();
+  let buffer = "";
+
+  stream.setEncoding("utf8");
+  stream.on("data", (chunk: string) => {
+    buffer += chunk;
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.length > 0) {
+        const message = JSON.parse(line) as { id?: string | number };
+        if (message.id !== undefined) {
+          messages.set(message.id, message);
+          const waiter = waiters.get(message.id);
+          if (waiter) {
+            waiters.delete(message.id);
+            waiter(message);
+          }
+        }
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+  });
+
+  return {
+    waitFor(id: string | number): Promise<unknown> {
+      const existing = messages.get(id);
+      if (existing !== undefined) {
+        return Promise.resolve(existing);
+      }
+      return new Promise((resolve) => {
+        waiters.set(id, resolve);
+      });
     },
   };
 }
@@ -141,9 +184,11 @@ describe("parseListenTargets", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners(["ws://127.0.0.1:0/rpc"], { backend })).rejects.toThrow(
-        "Unsupported WebSocket path in listen target: ws://127.0.0.1:0/rpc"
-      );
+      await expect(
+        startAppServerListeners(["ws://127.0.0.1:0/rpc"], {
+          backendRouter: new BackendRouter([backend]),
+        })
+      ).rejects.toThrow("Unsupported WebSocket path in listen target: ws://127.0.0.1:0/rpc");
     } finally {
       await backend.dispose();
     }
@@ -191,7 +236,9 @@ describe("runCli", () => {
       stdin,
       stdout,
       stderr,
-      env: {},
+      env: {
+        CODAPTER_CODEX_DISABLE: "1",
+      },
     });
 
     expect(result).toEqual({ exitCode: 0 });
@@ -204,6 +251,111 @@ describe("runCli", () => {
         platformOs: expect.any(String),
       },
     });
+  });
+
+  it("fails fast on invalid CODAPTER_CODEX_TRANSPORT", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stderrChunks: string[] = [];
+    stderr.setEncoding("utf8");
+    stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+    const result = await runCli(["app-server"], {
+      stdin: Readable.from([]),
+      stdout,
+      stderr,
+      env: {
+        CODAPTER_PI_DISABLE: "1",
+        CODAPTER_CODEX_TRANSPORT: "banana",
+      },
+    });
+
+    expect(result).toEqual({ exitCode: 1 });
+    expect(stderrChunks.join("")).toContain("Invalid CODAPTER_CODEX_TRANSPORT: banana");
+  });
+
+  it("does not block later stdio requests behind a slow request", async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = new PassThrough();
+    const collector = createNdjsonCollector(stdout);
+    let releaseResume: (() => void) | null = null;
+
+    const originalHandleMessage = AppServerConnection.prototype.handleMessage;
+    const handleMessageSpy = vi
+      .spyOn(AppServerConnection.prototype, "handleMessage")
+      .mockImplementation(function (message: unknown) {
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          "method" in message &&
+          (message as { method?: unknown }).method === "thread/resume"
+        ) {
+          return new Promise((resolve) => {
+            releaseResume = () => {
+              resolve({
+                id: (message as { id?: string | number }).id ?? null,
+                result: { thread: { id: "stalled-thread" } },
+              });
+            };
+          });
+        }
+        return originalHandleMessage.call(this, message);
+      });
+
+    try {
+      const resultPromise = runCli(["app-server"], {
+        stdin,
+        stdout,
+        stderr,
+        env: {
+          CODAPTER_CODEX_DISABLE: "1",
+        },
+      });
+
+      stdin.write(
+        `${JSON.stringify({
+          id: 1,
+          method: "initialize",
+          params: {
+            clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+            capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+          },
+        })}\n`
+      );
+      expect(await collector.waitFor(1)).toMatchObject({
+        id: 1,
+        result: { userAgent: expect.any(String) },
+      });
+
+      stdin.write(`${JSON.stringify({ id: 2, method: "thread/resume", params: {} })}\n`);
+      stdin.write(
+        `${JSON.stringify({
+          id: 3,
+          method: "account/read",
+          params: { refreshToken: false },
+        })}\n`
+      );
+
+      await expect(collector.waitFor(3)).resolves.toMatchObject({
+        id: 3,
+        result: {
+          account: null,
+          requiresOpenaiAuth: false,
+        },
+      });
+
+      releaseResume?.();
+      expect(await collector.waitFor(2)).toMatchObject({
+        id: 2,
+        result: { thread: { id: "stalled-thread" } },
+      });
+
+      stdin.end();
+      expect(await resultPromise).toEqual({ exitCode: 0 });
+    } finally {
+      handleMessageSpy.mockRestore();
+    }
   });
 
   it("runs stdio via --listen stdio with shutdown signal", async () => {
@@ -429,9 +581,9 @@ describe("startAppServerListeners", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners(["stdio"], { backend })).rejects.toThrow(
-        "stdio listener requires stdin and stdout streams"
-      );
+      await expect(
+        startAppServerListeners(["stdio"], { backendRouter: new BackendRouter([backend]) })
+      ).rejects.toThrow("stdio listener requires stdin and stdout streams");
     } finally {
       await backend.dispose();
     }
@@ -444,9 +596,11 @@ describe("startAppServerListeners", () => {
     await backend.initialize();
 
     try {
-      await expect(startAppServerListeners([`unix://${socketPath}`], { backend })).rejects.toThrow(
-        `Refusing to replace non-socket path: ${socketPath}`
-      );
+      await expect(
+        startAppServerListeners([`unix://${socketPath}`], {
+          backendRouter: new BackendRouter([backend]),
+        })
+      ).rejects.toThrow(`Refusing to replace non-socket path: ${socketPath}`);
     } finally {
       await backend.dispose();
     }

@@ -1,16 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm } from "node:fs/promises";
 import { type IncomingMessage, type ServerResponse, createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { createCodexBackend } from "@codapter/backend-codex";
 import { createPiBackend } from "@codapter/backend-pi";
 import {
   AppServerConnection,
-  type IBackend,
+  BackendRouter,
+  type StoredAuthState,
   failure,
   parseNdjsonLine,
+  readStoredAuthState,
   serializeNdjsonLine,
 } from "@codapter/core";
 import { type RawData, type WebSocket, WebSocketServer } from "ws";
@@ -25,6 +28,20 @@ function envFlagEnabled(value: string | undefined): boolean {
 
   const normalized = value.trim().toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function parseCodexTransport(value: string | undefined): "stdio" | "websocket" | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.length === 0 || normalized === "stdio") {
+    return "stdio";
+  }
+  if (normalized === "websocket") {
+    return "websocket";
+  }
+  throw new Error(`Invalid CODAPTER_CODEX_TRANSPORT: ${value}`);
 }
 
 export interface CliEnvironment {
@@ -57,10 +74,11 @@ export interface ListenerSet {
 }
 
 export interface ListenerOptions {
-  readonly backend: IBackend;
+  readonly backendRouter: BackendRouter;
   readonly stdin?: NodeJS.ReadableStream;
   readonly stdout?: NodeJS.WritableStream;
   readonly collabEnabled?: boolean;
+  readonly initialAuthState?: StoredAuthState | null;
 }
 
 type ParsedListenTarget =
@@ -166,32 +184,80 @@ export async function runCli(
 
   try {
     const parsed = parseListenTargets(commandArgs, env);
-    const piCommand = env.CODAPTER_PI_COMMAND;
-    const piArgsRaw = env.CODAPTER_PI_ARGS;
-    let piArgs: string[] | undefined;
-    if (piArgsRaw) {
-      const parsed = JSON.parse(piArgsRaw);
-      if (!Array.isArray(parsed)) {
-        throw new Error("CODAPTER_PI_ARGS must be a JSON array of strings");
+    const initializedBackends: Array<
+      ReturnType<typeof createPiBackend> | ReturnType<typeof createCodexBackend>
+    > = [];
+    const backends: Array<
+      ReturnType<typeof createPiBackend> | ReturnType<typeof createCodexBackend>
+    > = [];
+    if (!envFlagEnabled(env.CODAPTER_PI_DISABLE)) {
+      const piCommand = env.CODAPTER_PI_COMMAND;
+      const piArgsRaw = env.CODAPTER_PI_ARGS;
+      let piArgs: string[] | undefined;
+      if (piArgsRaw) {
+        const parsed = JSON.parse(piArgsRaw);
+        if (!Array.isArray(parsed)) {
+          throw new Error("CODAPTER_PI_ARGS must be a JSON array of strings");
+        }
+        piArgs = parsed;
       }
-      piArgs = parsed;
+      const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
+      const piIdleTimeoutMs =
+        piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
+          ? Number(piIdleTimeoutRaw)
+          : undefined;
+      const piStaticModelsPath = env.CODAPTER_PI_STATIC_MODELS_FILE?.trim() || undefined;
+      const piBackend = createPiBackend({
+        ...(piCommand ? { command: piCommand } : {}),
+        ...(piArgs ? { args: piArgs } : {}),
+        ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
+        ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
+        ...(piStaticModelsPath ? { staticAvailableModelsPath: piStaticModelsPath } : {}),
+      });
+      backends.push(piBackend);
+      initializedBackends.push(piBackend);
+      await piBackend.initialize();
     }
-    const piIdleTimeoutRaw = env.CODAPTER_PI_IDLE_TIMEOUT_MS;
-    const piIdleTimeoutMs =
-      piIdleTimeoutRaw && Number.isFinite(Number(piIdleTimeoutRaw))
-        ? Number(piIdleTimeoutRaw)
-        : undefined;
-    const backend = createPiBackend({
-      ...(piCommand ? { command: piCommand } : {}),
-      ...(piArgs ? { args: piArgs } : {}),
-      ...(piIdleTimeoutMs !== undefined ? { idleTimeoutMs: piIdleTimeoutMs } : {}),
-      ...(parsed.collabEnabled ? { collabExtensionPath: resolveCollabExtensionPath(env) } : {}),
-    });
-    await backend.initialize();
+
+    const codexBackends = [];
+    if (!envFlagEnabled(env.CODAPTER_CODEX_DISABLE)) {
+      const codexArgsRaw = env.CODAPTER_CODEX_ARGS;
+      let codexArgs: string[] | undefined;
+      if (codexArgsRaw) {
+        const parsedArgs = JSON.parse(codexArgsRaw);
+        if (!Array.isArray(parsedArgs)) {
+          throw new Error("CODAPTER_CODEX_ARGS must be a JSON array of strings");
+        }
+        codexArgs = parsedArgs;
+      }
+      const codexTransport = parseCodexTransport(env.CODAPTER_CODEX_TRANSPORT);
+      const codexBackend = createCodexBackend({
+        ...(env.CODAPTER_CODEX_COMMAND ? { command: env.CODAPTER_CODEX_COMMAND } : {}),
+        ...(codexArgs ? { args: codexArgs } : {}),
+        ...(codexTransport ? { transport: codexTransport } : {}),
+        ...(env.CODAPTER_CODEX_WS_URL ? { websocketUrl: env.CODAPTER_CODEX_WS_URL } : {}),
+        stderr,
+      });
+      codexBackends.push(codexBackend);
+      backends.push(codexBackend);
+      initializedBackends.push(codexBackend);
+      try {
+        await codexBackend.initialize();
+      } catch (error) {
+        stderr.write(
+          `[codapter] Codex backend unavailable: ${error instanceof Error ? error.message : String(error)}\n`
+        );
+      }
+    }
+
+    const backendRouter = new BackendRouter(backends);
+    const initialAuthState = backendRouter.getBackend("codex") ? readStoredAuthState() : null;
 
     const signalCodes: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
     const cleanup = async (signal: string) => {
-      await backend.dispose();
+      await Promise.all(
+        initializedBackends.map(async (backend) => backend.dispose().catch(() => {}))
+      );
       process.exit(signalCodes[signal] ?? 1);
     };
     process.on("SIGINT", () => cleanup("SIGINT"));
@@ -199,15 +265,22 @@ export async function runCli(
 
     try {
       if (parsed.listenTargets.length === 0) {
-        await runStdioAppServer(stdin, stdout, backend, parsed.collabEnabled);
+        await runStdioAppServer(
+          stdin,
+          stdout,
+          backendRouter,
+          parsed.collabEnabled,
+          initialAuthState
+        );
         return { exitCode: 0 };
       }
 
       const listeners = await startAppServerListeners(parsed.listenTargets, {
-        backend,
+        backendRouter,
         stdin,
         stdout,
         collabEnabled: parsed.collabEnabled,
+        initialAuthState,
       });
       stderr.write(`Listening on ${listeners.addresses.join(", ")}\n`);
 
@@ -219,7 +292,9 @@ export async function runCli(
 
       return { exitCode: 0 };
     } finally {
-      await backend.dispose();
+      await Promise.all(
+        initializedBackends.map(async (backend) => backend.dispose().catch(() => {}))
+      );
     }
   } catch (error) {
     stderr.write(`${error instanceof Error ? error.message : "Invalid CLI arguments"}\n`);
@@ -259,12 +334,14 @@ export async function startAppServerListeners(
 async function runStdioAppServer(
   stdin: NodeJS.ReadableStream,
   stdout: NodeJS.WritableStream,
-  backend: IBackend,
-  collabEnabled = false
+  backendRouter: BackendRouter,
+  collabEnabled = false,
+  initialAuthState: StoredAuthState | null = null
 ): Promise<void> {
   const connection = new AppServerConnection({
-    backend,
+    backendRouter,
     collabEnabled,
+    initialAuthState,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },
@@ -275,22 +352,7 @@ async function runStdioAppServer(
   });
 
   try {
-    for await (const line of readline) {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) {
-        continue;
-      }
-
-      try {
-        const message = parseNdjsonLine(trimmed);
-        const response = await connection.handleMessage(message);
-        if (response) {
-          stdout.write(serializeNdjsonLine(response));
-        }
-      } catch {
-        stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
-      }
-    }
+    await pumpStdioMessages(readline, connection, stdout);
   } finally {
     readline.close();
     await connection.dispose();
@@ -303,8 +365,9 @@ function startStdioListener(
   options: ListenerOptions
 ): ListenerHandle {
   const connection = new AppServerConnection({
-    backend: options.backend,
+    backendRouter: options.backendRouter,
     collabEnabled: options.collabEnabled,
+    initialAuthState: options.initialAuthState ?? null,
     onMessage(message) {
       stdout.write(serializeNdjsonLine(message));
     },
@@ -316,22 +379,7 @@ function startStdioListener(
 
   const done = (async () => {
     try {
-      for await (const line of readline) {
-        const trimmed = line.trim();
-        if (trimmed.length === 0) {
-          continue;
-        }
-
-        try {
-          const message = parseNdjsonLine(trimmed);
-          const response = await connection.handleMessage(message);
-          if (response) {
-            stdout.write(serializeNdjsonLine(response));
-          }
-        } catch {
-          stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
-        }
-      }
+      await pumpStdioMessages(readline, connection, stdout);
     } finally {
       readline.close();
       await connection.dispose();
@@ -345,6 +393,48 @@ function startStdioListener(
       await done;
     },
   };
+}
+
+async function pumpStdioMessages(
+  readline: ReturnType<typeof createInterface>,
+  connection: AppServerConnection,
+  stdout: NodeJS.WritableStream
+): Promise<void> {
+  const pending = new Set<Promise<void>>();
+
+  const track = (work: Promise<void>) => {
+    pending.add(work);
+    void work.finally(() => {
+      pending.delete(work);
+    });
+  };
+
+  for await (const line of readline) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+
+    track(handleStdioMessage(trimmed, connection, stdout));
+  }
+
+  await Promise.allSettled([...pending]);
+}
+
+async function handleStdioMessage(
+  line: string,
+  connection: AppServerConnection,
+  stdout: NodeJS.WritableStream
+): Promise<void> {
+  try {
+    const message = parseNdjsonLine(line);
+    const response = await connection.handleMessage(message);
+    if (response) {
+      stdout.write(serializeNdjsonLine(response));
+    }
+  } catch {
+    stdout.write(serializeNdjsonLine(failure(null, -32700, "Parse error")));
+  }
 }
 
 async function startAppServerListener(
@@ -444,7 +534,7 @@ function createRpcServer(options: ListenerOptions): {
 
   websocketServer.on("connection", (socket: WebSocket) => {
     const connection = new AppServerConnection({
-      backend: options.backend,
+      backendRouter: options.backendRouter,
       collabEnabled: options.collabEnabled,
       onMessage(message) {
         socket.send(JSON.stringify(message));
@@ -594,8 +684,8 @@ function writeHelp(stdout: NodeJS.WritableStream): void {
 }
 
 export async function createUnixSocketPath(prefix = "codapter"): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), `${prefix}-${randomUUID()}-`));
-  return join(directory, "adapter.sock");
+  const socketName = `${prefix}-${randomUUID().slice(0, 8)}.sock`;
+  return join(tmpdir(), socketName);
 }
 
 export function getTcpListenerPort(address: string): number {

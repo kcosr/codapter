@@ -6,9 +6,14 @@ A protocol adapter that lets clients built around the Codex app-server protocol 
 
 ![Codapter running inside Codex Desktop](docs/images/codex-desktop-example.png)
 
-*Codex Desktop connected through codapter to a Pi-backed remote session.*
+*Codex Desktop connected through codapter via routed backends.*
 
-**First supported backend**: [Pi](https://github.com/badlogic/pi-mono) (`@mariozechner/pi-coding-agent`) with multi-provider LLM support (Anthropic, OpenAI, Google, Mistral, and more).
+**Supported backends in this branch**:
+- [Pi](https://github.com/badlogic/pi-mono) (`@mariozechner/pi-coding-agent`) with multi-provider LLM support.
+- Codex app-server proxy backend over stdio.
+- Backends are registered at startup by the CLI bootstrap. In this branch, Pi is required at startup and Codex is optional (disabled by `CODAPTER_CODEX_DISABLE` or skipped if unavailable).
+
+**Codex websocket status**: websocket transport for the Codex backend is intentionally deferred in this topic. Current behavior is deterministic reject when `CODAPTER_CODEX_TRANSPORT=websocket` is selected. The next extension target is Codex backend websocket support.
 
 ## How It Works
 
@@ -20,28 +25,30 @@ graph TB
 
     subgraph Codapter
         Transport["Transport Layer<br/>stdio / WebSocket TCP / WebSocket UDS"]
-        AppServer["App Server<br/>JSON-RPC protocol handler"]
+        AppServer["App Server<br/>JSON-RPC dispatch + publish"]
+        Router["BackendRouter<br/>model aggregation + routing"]
         Registry["Thread Registry<br/>persistent thread metadata"]
         ConfigStore["Config Store<br/>persistent settings"]
         CmdExec["Command Exec<br/>adapter-native shell"]
-        TurnSM["Turn State Machine<br/>event decomposition"]
     end
 
-    subgraph Backend["Backend (Pi)"]
+    subgraph Backends["Registered Backends"]
         PiBackend["Pi Backend<br/>IBackend implementation"]
-        PiProc1["Pi Process 1<br/>Thread A"]
-        PiProc2["Pi Process 2<br/>Thread B"]
+        PiProc["Pi subprocesses"]
+        CodexBackend["Codex Backend<br/>IBackend implementation"]
+        CodexProc["codex app-server subprocess"]
     end
 
     GUI -->|"JSON-RPC<br/>NDJSON / WebSocket"| Transport
     Transport --> AppServer
+    AppServer --> Router
     AppServer --> Registry
     AppServer --> ConfigStore
     AppServer --> CmdExec
-    AppServer --> TurnSM
-    TurnSM --> PiBackend
-    PiBackend --> PiProc1
-    PiBackend --> PiProc2
+    Router --> PiBackend
+    Router --> CodexBackend
+    PiBackend --> PiProc
+    CodexBackend --> CodexProc
 ```
 
 ## Quick Start
@@ -116,102 +123,32 @@ All WebSocket listeners serve the root `/` endpoint. Health checks are available
 
 ### Request Lifecycle
 
-```mermaid
-sequenceDiagram
-    participant GUI as Codex Desktop
-    participant Adapter as Codapter
-    participant Registry as Thread Registry
-    participant Backend as Pi Backend
-    participant Pi as Pi Process
+Current routed lifecycle:
 
-    GUI->>Adapter: initialize {clientInfo, capabilities}
-    Adapter->>GUI: {userAgent, platformFamily, platformOs}
-    GUI->>Adapter: initialized (notification)
-
-    Note over GUI,Adapter: Connection ready
-
-    GUI->>Adapter: thread/start {model, cwd}
-    Adapter->>Backend: createSession(cwd)
-    Backend->>Pi: spawn pi-coding-agent --mode rpc
-    Pi-->>Backend: process ready
-    Adapter->>Registry: store thread metadata
-    Adapter->>GUI: {thread: {id, status, cwd, ...}}
-
-    GUI->>Adapter: turn/start {threadId, input}
-    Adapter->>Backend: prompt(sessionId, turnId, text)
-    Backend->>Pi: {"type":"prompt","message":"..."}
-
-    loop Streaming Events
-        Pi-->>Backend: text_delta / tool_start / tool_end / ...
-        Backend-->>Adapter: BackendEvent
-        Adapter->>Adapter: TurnStateMachine processes event
-        Adapter-->>GUI: item/agentMessage/delta
-        Adapter-->>GUI: item/started (commandExecution)
-        Adapter-->>GUI: item/commandExecution/outputDelta
-        Adapter-->>GUI: item/completed
-    end
-
-    Pi-->>Backend: message_end
-    Backend-->>Adapter: {type: "message_end"}
-    Adapter-->>GUI: turn/completed {status: "completed"}
-```
+1. Client initializes the app-server connection (`initialize`, `initialized`).
+2. `model/list` is aggregated across healthy registered backends (`BackendRouter`).
+3. `thread/start` resolves the selected backend from the chosen model id. Pi models remain prefixed (`pi::...`); unprefixed ids route to Codex, and legacy `codex::...` ids are still accepted.
+4. Thread metadata is stored in the registry with `{ backendType, backendSessionId }`.
+5. `turn/start` routes to the owning backend thread handle.
+6. Backend notifications/server-requests are relayed to the client through `AppServerConnection`.
 
 ### Thread & Session Model
 
-Codapter maintains a **thread registry** as the single source of truth for all thread identity and metadata. Each thread maps to a backend session through an opaque session ID.
-
-```mermaid
-graph LR
-    subgraph "Thread Registry (persistent)"
-        T1["Thread abc-123<br/>name: 'Fix login bug'<br/>archived: false<br/>cwd: /home/user/project"]
-        T2["Thread def-456<br/>name: 'Add tests'<br/>archived: false<br/>cwd: /home/user/project"]
-        T3["Thread ghi-789<br/>name: 'Old thread'<br/>archived: true"]
-    end
-
-    subgraph "Backend Sessions"
-        S1["Pi Session pi_session_aaa<br/>(process running)"]
-        S2["Pi Session pi_session_bbb<br/>(process idle)"]
-        S3["Pi Session pi_session_ccc<br/>(no process)"]
-    end
-
-    T1 -->|backendSessionId| S1
-    T2 -->|backendSessionId| S2
-    T3 -->|backendSessionId| S3
-```
+Codapter maintains a **thread registry** as the single source of truth for thread identity and metadata.
 
 **Storage**: `~/.local/share/codapter/threads.json` (atomic writes via temp file + rename)
 
 **Key behaviors**:
 - `thread/list` reads exclusively from the registry — never from the backend
-- `thread/start` creates both a registry entry and a backend session
-- `thread/resume` spawns a new backend process and reattaches to the existing session
-- `thread/fork` creates a new registry entry and clones the backend session
+- `thread/start` creates both a registry entry and an owning backend thread handle
+- `thread/resume` reattaches using persisted `{ backendType, backendSessionId }`
+- `thread/fork` creates a new registry entry and backend-owned forked thread handle
 - `thread/archive` marks the thread in the registry and disposes the backend process
 
-### Turn State Machine
-
-Each active turn runs a state machine that decomposes backend events into Codex GUI notifications:
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle: thread created
-    Idle --> TurnActive: turn/start
-    TurnActive --> TurnActive: text_delta → item/agentMessage/delta
-    TurnActive --> TurnActive: thinking_delta → item/reasoning/summaryTextDelta
-    TurnActive --> TurnActive: tool_start → item/started
-    TurnActive --> TurnActive: tool_update → item/outputDelta
-    TurnActive --> TurnActive: tool_end → item/completed
-    TurnActive --> Idle: message_end → turn/completed(completed)
-    TurnActive --> Idle: error → turn/completed(failed)
-    TurnActive --> Idle: turn/interrupt → turn/completed(interrupted)
-```
-
-**Tool classification** is heuristic — based on the tool name:
-- Names matching `bash`, `shell`, `command` → `commandExecution` item
-- Names matching `edit`, `write`, `patch`, `file` → `fileChange` item
-- Everything else → `agentMessage` item (tool output rendered as text)
-
-**Cumulative output handling**: Pi's `tool_execution_update` sends cumulative (full) output, not deltas. The state machine diffs against previous output to extract the true delta for Codex streaming.
+Detailed current architecture and contract docs live in:
+- `docs/architecture.md`
+- `docs/backend-interface.md`
+- `docs/api-mapping.md`
 
 ### Command Execution
 
@@ -239,7 +176,12 @@ Output is capped at 1MB per stream by default (configurable via `outputBytesCap`
 | `CODAPTER_PI_COMMAND` | Override the command used to launch Pi | `npx` |
 | `CODAPTER_PI_ARGS` | Override Pi launch args (JSON array string); `--session-dir` is always appended | `["--yes","@mariozechner/pi-coding-agent","--mode","rpc"]` |
 | `CODAPTER_PI_IDLE_TIMEOUT_MS` | Idle timeout before Pi processes are gracefully stopped (ms; 0 disables) | `300000` (5 min) |
-| `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codex-app-server` |
+| `CODAPTER_CODEX_DISABLE` | Disable Codex backend registration at startup (`1`, `true`, `yes`, `on`) | *(enabled)* |
+| `CODAPTER_CODEX_COMMAND` | Override the command used to launch Codex app-server | `codex` |
+| `CODAPTER_CODEX_ARGS` | Override Codex launch args (JSON array string) | `["app-server"]` |
+| `CODAPTER_CODEX_TRANSPORT` | Codex backend transport (`stdio` or `websocket`) | `stdio` |
+| `CODAPTER_CODEX_WS_URL` | Codex websocket URL when websocket transport is selected | *(none)* |
+| `CODAPTER_EMULATE_CODEX_IDENTITY` | User agent string returned in `initialize` | `codapter/<ADAPTER_VERSION>` |
 | `CODAPTER_COLLAB_EXTENSION_PATH` | Override path to the collab extension script | *(built-in)* |
 | `CODAPTER_DEBUG_LOG_FILE` | Path to JSONL debug log file | *(disabled)* |
 
@@ -277,7 +219,7 @@ The Pi backend uses its own configuration at `~/.pi/agent/`:
 | `config/read` | Read adapter configuration |
 | `config/value/write` / `config/batchWrite` | Write configuration (persisted to disk) |
 | `configRequirements/read` | Returns null (no requirements) |
-| `getAuthStatus` / `account/read` | Returns synthetic auth state (chatgpt/pro) |
+| `getAuthStatus` / `account/read` | Returns current adapter auth state (null, API key, or ChatGPT token identity) |
 | `command/exec` | Execute shell commands (adapter-native) |
 | `command/exec/write` | Write to process stdin |
 | `command/exec/terminate` | Kill running process |
@@ -321,6 +263,8 @@ Notifications emitted to the GUI during turns:
 | `item/fileChange/outputDelta` | Streamed file change content |
 | `command/exec/outputDelta` | Standalone shell output (not turn-related) |
 | `thread/tokenUsage/updated` | Token usage statistics |
+| `backend/error` | Backend emits an explicit error event for a thread |
+| `backend/disconnect` | Backend disconnects or child process exits |
 
 ## Remote Setup
 
@@ -372,52 +316,53 @@ The adapter stays alive with backend processes managed by idle timeouts. When Co
 
 ## Backend Interface
 
-Codapter is designed to support multiple backends through the `IBackend` interface. Pi is the first implementation.
+Codapter is designed to support multiple backends through the `IBackend` interface. Pi and Codex backends are both implemented, with Codex currently on stdio transport.
 
 ```mermaid
 classDiagram
     class IBackend {
         <<interface>>
+        +backendType string
         +initialize() Promise~void~
         +dispose() Promise~void~
         +isAlive() boolean
-        +createSession(config?) Promise~string~
-        +resumeSession(sessionId, config?) Promise~string~
-        +forkSession(sessionId, config?) Promise~string~
-        +disposeSession(sessionId) Promise~void~
-        +readSessionHistory(sessionId) Promise~BackendMessage[]~
-        +setSessionName(sessionId, name) Promise~void~
-        +getSessionPath(sessionId) Promise~string | null~
-        +prompt(sessionId, turnId, text, images?) Promise~void~
-        +abort(sessionId) Promise~void~
         +listModels() Promise~BackendModelSummary[]~
-        +setModel(sessionId, modelId) Promise~void~
-        +getCapabilities() Promise~BackendCapabilities~
-        +respondToElicitation(sessionId, requestId, response) Promise~void~
-        +onEvent(sessionId, listener) Disposable
+        +parseModelSelection(model) ParsedBackendSelection|null
+        +threadStart(input) Promise~BackendThreadStartResult~
+        +threadResume(input) Promise~BackendThreadResumeResult~
+        +threadFork(input) Promise~BackendThreadForkResult~
+        +threadRead(input) Promise~BackendThreadReadResult~
+        +threadArchive(input) Promise~void~
+        +threadSetName(input) Promise~void~
+        +turnStart(input) Promise~BackendTurnStartResult~
+        +turnInterrupt(input) Promise~void~
+        +resolveServerRequest(input) Promise~void~
+        +onEvent(threadHandle, listener) Disposable
     }
 
-    class PiBackend {
-        -processes: Map
-        -stateStore: PiStateStore
-        +initialize()
-        +createSession(config?)
-        +prompt(sessionId, turnId, text)
-        ...
+    class BackendRouter {
+        +listModels() Promise~BackendModelSummary[]~
+        +resolveModelSelection(model) BackendModelSelection
     }
+
+    class PiBackend
+    class CodexBackend
 
     IBackend <|.. PiBackend
+    IBackend <|.. CodexBackend
+    BackendRouter --> IBackend
 ```
 
-To add a new backend, implement `IBackend` and register it in the CLI entry point. The core adapter handles all protocol translation, thread management, and streaming — the backend only needs to manage sessions and emit events.
+To add a new backend, implement `IBackend` and register it in the CLI bootstrap so `BackendRouter` can aggregate models and route thread/turn operations.
 
 ## Project Structure
 
 ```
 codapter/
 ├── packages/
-│   ├── core/                  # Protocol handling, state machines, transport
+│   ├── core/                  # Protocol handling, routing, registry, adapter-native command exec
 │   ├── backend-pi/            # Pi backend implementation
+│   ├── backend-codex/         # Codex app-server proxy backend
 │   ├── collab-extension/      # Pi extension for sub-agent collaboration
 │   └── cli/                   # CLI entry point & transports
 ├── dist/                      # Single-file ESM bundle (codapter.mjs)
@@ -450,7 +395,7 @@ npm run lint
 npm run check
 
 # Run smoke tests (requires Pi with API keys)
-PI_SMOKE_TEST=1 npm run test:smoke
+PI_SMOKE_TEST=1 CODEX_SMOKE_TEST=1 npm run test:smoke
 ```
 
 ## Debugging
@@ -510,6 +455,8 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 - **Collab requires adapter support**: collab/sub-agent workflows require starting codapter with `--collab` or `CODAPTER_COLLAB=1`
 - **No MCP tools**: MCP server integration is not available through Pi
 - **No realtime/voice**: Pi has no voice API
+- **Cross-backend sub-agents are one-way**: Pi-backed threads can spawn Codex sub-agents, but Codex-backed threads cannot spawn Pi sub-agents
+- **Codex websocket transport deferred**: `CODAPTER_CODEX_TRANSPORT=websocket` returns a deterministic deferred error in this topic
 - **No worktree management**: Git worktree RPCs return method-not-found (planned as future adapter-native feature)
 - **No PTY mode**: `command/exec` with `tty: true` is rejected
 - **Single instance per state directory**: Multi-window concurrent writes to the thread registry are not locked in v0.1
@@ -517,7 +464,8 @@ CODEX_SPARKLE_ENABLED=false /Applications/Codex.app/Contents/MacOS/Codex
 
 ## Roadmap
 
-- Support additional backends, including Codex
+- Add Codex websocket transport support
+- Support additional backends beyond Pi and Codex
 - Support additional upstream clients and protocols beyond the current Codex Desktop app-server flow
 - Align adapter types with upstream Codex and `pi-mono` definitions instead of maintaining local copies
 

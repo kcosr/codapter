@@ -110,7 +110,12 @@ export class TurnStateMachine {
     });
   }
 
-  async emitUserMessage(content: JsonValue[]): Promise<void> {
+  async emitUserMessage(
+    content: JsonValue[],
+    options?: {
+      notify?: boolean;
+    }
+  ): Promise<void> {
     if (this.turn.items.some((item) => item.type === "userMessage")) {
       return;
     }
@@ -120,8 +125,9 @@ export class TurnStateMachine {
       id: `${this.turn.id}_user`,
       content: structuredClone(content),
     };
-    await this.storeItem(item);
-    await this.completeItem(item.id);
+    const notify = options?.notify ?? true;
+    await this.storeItem(item, { notify });
+    await this.completeItem(item.id, undefined, { notify });
   }
 
   async handleEvent(event: BackendEvent): Promise<Turn | null> {
@@ -403,9 +409,17 @@ export class TurnStateMachine {
     return item.id;
   }
 
-  private async storeItem(item: ThreadItem): Promise<void> {
+  private async storeItem(
+    item: ThreadItem,
+    options?: {
+      notify?: boolean;
+    }
+  ): Promise<void> {
     this.items.set(item.id, item);
     this.turn.items.push(item);
+    if (options?.notify === false) {
+      return;
+    }
     await this.sink.notify("item/started", {
       item: structuredClone(item),
       threadId: this.threadId,
@@ -413,16 +427,24 @@ export class TurnStateMachine {
     });
   }
 
-  private async completeItem(itemId: string, itemOverride?: ThreadItem): Promise<void> {
+  private async completeItem(
+    itemId: string,
+    itemOverride?: ThreadItem,
+    options?: {
+      notify?: boolean;
+    }
+  ): Promise<void> {
     const item = this.items.get(itemId);
     if (!item) {
       return;
     }
-    await this.sink.notify("item/completed", {
-      item: structuredClone(itemOverride ?? item),
-      threadId: this.threadId,
-      turnId: this.turn.id,
-    });
+    if (options?.notify !== false) {
+      await this.sink.notify("item/completed", {
+        item: structuredClone(itemOverride ?? item),
+        threadId: this.threadId,
+        turnId: this.turn.id,
+      });
+    }
     if (this.agentMessageItemId === itemId) {
       this.agentMessageItemId = null;
     }
@@ -457,9 +479,13 @@ export class TurnStateMachine {
 
     this.turn.status = status;
     this.turn.error = error;
+    const completedTurn = {
+      ...this.snapshot,
+      items: [],
+    };
     await this.sink.notify("turn/completed", {
       threadId: this.threadId,
-      turn: this.snapshot,
+      turn: completedTurn,
     });
     if (error) {
       await this.sink.notify("error", {

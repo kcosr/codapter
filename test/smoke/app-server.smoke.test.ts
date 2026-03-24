@@ -3,17 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AppServerConnection } from "../../packages/core/src/app-server.js";
-import type { BackendEvent, BackendMessage, IBackend } from "../../packages/core/src/backend.js";
+import {
+  type BackendAppServerEvent,
+  type BackendModelSummary,
+  type IBackend,
+  parseBackendModelId,
+} from "../../packages/core/src/backend.js";
 import { ThreadRegistry } from "../../packages/core/src/thread-registry.js";
 
 const describeIfSmoke = process.env.PI_SMOKE_TEST === "1" ? describe : describe.skip;
 
 class SmokeBackend implements IBackend {
-  private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  public readonly backendType = "pi";
+  private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
   public readonly activeTurns = new Map<string, string>();
-  private sessionCounter = 0;
-  public readonly sessionHistories = new Map<string, BackendMessage[]>();
-  public readonly modelChanges: Array<{ sessionId: string; model: string }> = [];
+  private threadCounter = 0;
+  public readonly modelChanges: Array<{ threadHandle: string; model: string }> = [];
 
   async initialize() {}
   async dispose() {}
@@ -22,58 +27,193 @@ class SmokeBackend implements IBackend {
     return true;
   }
 
-  async createSession() {
-    this.sessionCounter += 1;
-    return `smoke_session_${this.sessionCounter}`;
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    if (!parsed || parsed.backendType !== this.backendType) {
+      return null;
+    }
+    return parsed;
   }
 
-  async resumeSession(sessionId: string) {
-    return sessionId;
+  async threadStart(input: {
+    threadId: string;
+    cwd: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    this.threadCounter += 1;
+    const threadHandle = `smoke_thread_${this.threadCounter}`;
+    return {
+      threadHandle,
+      path: `/tmp/${threadHandle}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
   }
 
-  async forkSession(sessionId: string) {
-    this.sessionCounter += 1;
-    return `${sessionId}_fork_${this.sessionCounter}`;
+  async threadResume(input: {
+    threadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    return {
+      threadHandle: input.threadHandle,
+      path: `/tmp/${input.threadHandle}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
   }
 
-  async disposeSession() {}
-  async readSessionHistory(sessionId: string) {
-    return this.sessionHistories.get(sessionId) ?? [];
+  async threadFork(input: {
+    sourceThreadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    this.threadCounter += 1;
+    const threadHandle = `${input.sourceThreadHandle}_fork_${this.threadCounter}`;
+    return {
+      threadHandle,
+      path: `/tmp/${threadHandle}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
   }
-  async setSessionName() {}
 
-  async setModel(sessionId: string, model: string) {
-    this.modelChanges.push({ sessionId, model });
+  async threadRead(input: { threadHandle: string }) {
+    return {
+      threadHandle: input.threadHandle,
+      title: null,
+      model: null,
+      turns: [],
+    };
   }
 
-  async prompt(sessionId: string, turnId: string, text: string) {
-    this.activeTurns.set(sessionId, turnId);
+  async threadArchive() {}
+  async threadSetName() {}
+
+  async turnStart(input: {
+    threadId: string;
+    threadHandle: string;
+    turnId: string;
+    input: readonly Array<{ type: string; text?: string }>;
+    model: string | null;
+  }) {
+    const text = input.input
+      .filter((entry): entry is { type: "text"; text: string } => entry.type === "text")
+      .map((entry) => entry.text)
+      .join("\n");
+    this.activeTurns.set(input.threadHandle, input.turnId);
+    if (input.model) {
+      this.modelChanges.push({ threadHandle: input.threadHandle, model: input.model });
+    }
+
     queueMicrotask(() => {
+      this.emitNotification(input.threadHandle, "turn/started", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        turn: {
+          id: input.turnId,
+          items: [],
+          status: "inProgress",
+          error: null,
+        },
+      });
+
       if (text.startsWith("run ")) {
-        this.emitToolTurn(sessionId, turnId, "bash", text.slice(4), "output");
+        const command = text.slice(4);
+        this.emitNotification(input.threadHandle, "item/completed", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          item: {
+            type: "commandExecution",
+            id: `${input.turnId}_cmd`,
+            command,
+            cwd: "/repo",
+            processId: null,
+            status: "completed",
+            commandActions: [],
+            aggregatedOutput: "output",
+            exitCode: 0,
+            durationMs: 1,
+          },
+        });
       } else if (text.startsWith("edit ")) {
-        this.emitToolTurn(sessionId, turnId, "file_edit", text.slice(5), "ok");
-      } else if (text === "elicit") {
-        this.emitElicitationTurn(sessionId, turnId);
+        this.emitNotification(input.threadHandle, "item/completed", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          item: {
+            type: "fileChange",
+            id: `${input.turnId}_file`,
+            changes: [{ path: text.slice(5), kind: "update" }],
+            status: "completed",
+          },
+        });
+      } else if (text.includes("think")) {
+        this.emitNotification(input.threadHandle, "item/reasoning/summaryTextDelta", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          itemId: `${input.turnId}_reasoning`,
+          delta: "reasoning about it",
+        });
+        this.emitNotification(input.threadHandle, "item/agentMessage/delta", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          itemId: `${input.turnId}_msg`,
+          delta: text,
+        });
       } else {
-        this.emitTextTurn(sessionId, turnId, text);
+        this.emitNotification(input.threadHandle, "item/agentMessage/delta", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          itemId: `${input.turnId}_msg`,
+          delta: text,
+        });
       }
+
+      this.emitNotification(input.threadHandle, "thread/tokenUsage/updated", {
+        threadId: input.threadId,
+        tokenUsage: {
+          inputTokens: 10,
+          outputTokens: 20,
+          totalTokens: 30,
+        },
+      });
+      this.emitNotification(input.threadHandle, "turn/completed", {
+        threadId: input.threadId,
+        turnId: input.turnId,
+        turn: {
+          id: input.turnId,
+          items: [],
+          status: "completed",
+          error: null,
+        },
+      });
+    });
+    return { accepted: true as const };
+  }
+
+  async turnInterrupt(input: { threadId: string; threadHandle: string; turnId: string }) {
+    this.emitNotification(input.threadHandle, "turn/completed", {
+      threadId: input.threadId,
+      turnId: input.turnId,
+      turn: {
+        id: input.turnId,
+        items: [],
+        status: "interrupted",
+        error: null,
+      },
     });
   }
 
-  async abort(sessionId: string) {
-    const turnId = this.activeTurns.get(sessionId) ?? "unknown";
-    this.emit(sessionId, {
-      type: "message_end",
-      sessionId,
-      turnId,
-    });
-  }
+  async resolveServerRequest() {}
 
-  async listModels() {
+  async listModels(): Promise<readonly BackendModelSummary[]> {
     return [
       {
-        id: "pi/mock-default",
+        id: "mock-default",
         model: "mock-default",
         displayName: "Mock Default",
         description: "Smoke model",
@@ -85,7 +225,7 @@ class SmokeBackend implements IBackend {
         supportsPersonality: true,
       },
       {
-        id: "pi/mock-large",
+        id: "mock-large",
         model: "mock-large",
         displayName: "Mock Large",
         description: "Large smoke model",
@@ -102,25 +242,11 @@ class SmokeBackend implements IBackend {
     ];
   }
 
-  async getCapabilities() {
-    return {
-      requiresAuth: false,
-      supportsImages: false,
-      supportsThinking: true,
-      supportsParallelTools: false,
-      supportedToolTypes: [],
-    };
-  }
-
-  async respondToElicitation(sessionId: string, _requestId: string, _response: unknown) {
-    const turnId = this.activeTurns.get(sessionId) ?? "unknown";
-    this.emitTokenUsageAndEnd(sessionId, turnId);
-  }
-
-  onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
-    const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
+  onEvent(threadHandle: string, listener: (event: BackendAppServerEvent) => void) {
+    const listeners =
+      this.listeners.get(threadHandle) ?? new Set<(event: BackendAppServerEvent) => void>();
     listeners.add(listener);
-    this.listeners.set(sessionId, listeners);
+    this.listeners.set(threadHandle, listeners);
     return {
       dispose: () => {
         listeners.delete(listener);
@@ -128,102 +254,20 @@ class SmokeBackend implements IBackend {
     };
   }
 
-  private emit(sessionId: string, event: BackendEvent) {
-    for (const listener of this.listeners.get(sessionId) ?? []) {
+  private emitNotification(
+    threadHandle: string,
+    method: string,
+    params: Record<string, unknown>
+  ): void {
+    const event: BackendAppServerEvent = {
+      kind: "notification",
+      threadHandle,
+      method,
+      params,
+    };
+    for (const listener of this.listeners.get(threadHandle) ?? []) {
       listener(event);
     }
-  }
-
-  private emitTextTurn(sessionId: string, turnId: string, text: string) {
-    this.emit(sessionId, {
-      type: "thinking_delta",
-      sessionId,
-      turnId,
-      delta: "reasoning about it",
-    });
-    this.emit(sessionId, {
-      type: "text_delta",
-      sessionId,
-      turnId,
-      delta: text,
-    });
-    this.emitTokenUsageAndEnd(sessionId, turnId);
-  }
-
-  private emitToolTurn(
-    sessionId: string,
-    turnId: string,
-    toolName: string,
-    command: string,
-    output: string
-  ) {
-    this.emit(sessionId, {
-      type: "tool_start",
-      sessionId,
-      turnId,
-      toolCallId: `tool_${turnId}`,
-      toolName,
-      input: { command },
-    });
-    this.emit(sessionId, {
-      type: "tool_end",
-      sessionId,
-      turnId,
-      toolCallId: `tool_${turnId}`,
-      toolName,
-      output: { content: [{ type: "text", text: output }] },
-      isError: false,
-    });
-    this.emit(sessionId, {
-      type: "text_delta",
-      sessionId,
-      turnId,
-      delta: `Done: ${command}`,
-    });
-    this.emitTokenUsageAndEnd(sessionId, turnId);
-  }
-
-  private emitElicitationTurn(sessionId: string, turnId: string) {
-    this.emit(sessionId, {
-      type: "text_delta",
-      sessionId,
-      turnId,
-      delta: "need confirmation",
-    });
-    this.emit(sessionId, {
-      type: "elicitation_request",
-      sessionId,
-      turnId,
-      requestId: "smoke-elicit-1",
-      payload: {
-        type: "extension_ui_request",
-        id: "smoke-elicit-1",
-        method: "confirm",
-        title: "Confirm",
-        message: "Proceed?",
-      },
-    });
-  }
-
-  private emitTokenUsageAndEnd(sessionId: string, turnId: string) {
-    this.emit(sessionId, {
-      type: "token_usage",
-      sessionId,
-      turnId,
-      usage: {
-        input: 10,
-        output: 20,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 30,
-        modelContextWindow: 128000,
-      },
-    });
-    this.emit(sessionId, {
-      type: "message_end",
-      sessionId,
-      turnId,
-    });
   }
 }
 
@@ -259,6 +303,11 @@ async function startThread(
   requestId: number,
   opts?: { model?: string; cwd?: string }
 ): Promise<string> {
+  const selectedModel = opts?.model
+    ? opts.model.includes("::")
+      ? opts.model
+      : `pi::${opts.model}`
+    : undefined;
   const result = (await connection.handleMessage({
     id: requestId,
     method: "thread/start",
@@ -267,7 +316,7 @@ async function startThread(
       persistExtendedHistory: false,
       cwd: opts?.cwd ?? "/repo",
       modelProvider: "pi",
-      model: opts?.model,
+      model: selectedModel,
     },
   })) as { result: { thread: { id: string } } };
   return result.result.thread.id;
@@ -280,13 +329,18 @@ async function startTurn(
   text: string,
   opts?: { model?: string }
 ): Promise<unknown> {
+  const selectedModel = opts?.model
+    ? opts.model.includes("::")
+      ? opts.model
+      : `pi::${opts.model}`
+    : undefined;
   return connection.handleMessage({
     id: requestId,
     method: "turn/start",
     params: {
       threadId,
       input: [{ type: "text", text, text_elements: [] }],
-      model: opts?.model,
+      model: selectedModel,
     },
   });
 }
@@ -469,9 +523,10 @@ describeIfSmoke("codapter smoke", () => {
     const threadRegistry = new ThreadRegistry(join(directory, "threads.json"));
     const notifications: NotificationMessage[] = [];
     const backend = new SmokeBackend();
-    // Make prompt hang (no auto-complete) so we can interrupt
-    vi.spyOn(backend, "prompt").mockImplementation(async (sessionId, turnId) => {
-      backend.activeTurns.set(sessionId, turnId);
+    // Make turn start hang (no auto-complete) so we can interrupt
+    vi.spyOn(backend, "turnStart").mockImplementation(async (input) => {
+      backend.activeTurns.set(input.threadHandle, input.turnId);
+      return { accepted: true };
     });
     const connection = await initConnection(backend, threadRegistry, notifications);
 

@@ -5,12 +5,14 @@ This document maps Codex app-server concepts to the current codapter implementat
 Scope:
 - `packages/core`
 - `packages/backend-pi`
+- `packages/backend-codex`
 - `packages/cli`
 
 Status:
 - `turn/start`, `turn/interrupt`, thread lifecycle RPCs, and adapter-native `command/exec` are implemented.
-- Pi session lifecycle, prompt/abort, model listing, and token usage reporting are implemented in `backend-pi`.
-- Pi-backed elicitation is fully implemented: the adapter sends `item/tool/requestUserInput` server-requests to the GUI and resolves responses through the backend.
+- Routed model selection across multiple backends is implemented through `BackendRouter`.
+- Pi and Codex backends are both wired behind the shared `IBackend` contract.
+- Pi-backed elicitation is implemented through app-server server-request round-trips.
 - Worktree RPCs are not implemented and currently fall through to `Method not found`.
 
 ## Transport And Handshake
@@ -36,19 +38,19 @@ Status:
 | `getAuthStatus` | `AppServerConnection.handleGetAuthStatus()` | Supported for compatibility. |
 | `skills/list` | `AppServerConnection.handleSkillsList()` | Currently returns an empty payload unless the backend provides data. |
 | `plugin/list` | `AppServerConnection.handlePluginList()` | Currently returns an empty payload unless the backend provides data. |
-| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/0.0.1` (`ADAPTER_VERSION` in source), with platform detection. |
+| Adapter identity | `packages/core/src/app-server.ts` | Derived from env/TOML override or `codapter/<ADAPTER_VERSION>` (source constant), with platform detection. |
 
 ## Threads
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
-| `thread/start` | `AppServerConnection.handleThreadStart()` | Creates a backend session, registers the thread, and returns a typed `Thread` snapshot. |
-| `thread/resume` | `AppServerConnection.handleThreadResume()` | Reattaches to the opaque backend session id stored in the adapter registry. |
-| `thread/fork` | `AppServerConnection.handleThreadFork()` | Forks from the backend session, creates a new thread entry, and returns the new thread snapshot. |
-| `thread/read` | `AppServerConnection.handleThreadRead()` | Reads history from the backend and translates it into Codex `Turn`/`ThreadItem` data. |
-| `thread/list` | `ThreadRegistry` in `packages/core/src/thread-registry.ts` | Registry is authoritative. Backend session scans are not used for the list response. |
+| `thread/start` | `AppServerConnection.handleThreadStart()` + `BackendRouter.resolveModelSelection()` | Resolves backend ownership from the selected model and creates a backend thread handle. |
+| `thread/resume` | `AppServerConnection.handleThreadResume()` | Reattaches using the registry's `{ backendType, backendSessionId }`. |
+| `thread/fork` | `AppServerConnection.handleThreadFork()` | Forks through the owning backend and creates a new registry thread entry. |
+| `thread/read` | `AppServerConnection.handleThreadRead()` | Delegates to backend-owned `threadRead()`; adapter no longer rebuilds backend history itself. |
+| `thread/list` | `ThreadRegistry` in `packages/core/src/thread-registry.ts` | Registry is authoritative; entries retain backend ownership metadata. |
 | `thread/loaded/list` | `AppServerConnection.handleThreadLoadedList()` | Returns currently loaded thread ids only. |
-| `thread/name/set` | `AppServerConnection.handleThreadSetName()` | Updates backend session name and registry metadata. |
+| `thread/name/set` | `AppServerConnection.handleThreadSetName()` | Updates backend thread name and registry metadata. |
 | `thread/archive` / `thread/unarchive` | Registry metadata updates | Archive state lives in the adapter registry. |
 | `thread/metadata/update` | Registry metadata updates | Used for cwd and git info. |
 | `thread/unsubscribe` | Connection-local notification filter | Stops notifications for the thread on that connection. |
@@ -59,16 +61,11 @@ Status:
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
-| `turn/start` | `AppServerConnection.handleTurnStart()` | Validates the thread is ready, normalizes `UserInput[]`, calls `backend.prompt()`, and returns the initial `Turn`. |
-| `turn/interrupt` | `AppServerConnection.handleTurnInterrupt()` | Calls `backend.abort()` and finalizes the turn as interrupted. |
-| `turn/started` | `TurnStateMachine.emitStarted()` | Emitted before streamed deltas. |
-| `turn/completed` | `TurnStateMachine.complete()` | Finalizes the turn after backend completion, interrupt, or error. |
-| `item/started` | `TurnStateMachine.storeItem()` | Emitted when a new agent message, reasoning block, command execution item, or file change item opens. |
-| `item/completed` | `TurnStateMachine.completeItem()` | Emitted when an item is closed. |
-| `item/agentMessage/delta` | `TurnStateMachine.handleTextDelta()` and tool fallback path | Used for assistant text and generic tool output that is not recognized as a command/file change. |
-| `item/reasoning/summaryTextDelta` | `TurnStateMachine.handleThinkingDelta()` | Reasoning text is accumulated into a reasoning item. |
-| `item/commandExecution/outputDelta` | `TurnStateMachine.handleToolUpdate()` | Used for bash/shell/command-like tool calls. |
-| `item/fileChange/outputDelta` | `TurnStateMachine.handleToolUpdate()` | Used for edit/write/patch/file-like tool calls. |
+| `turn/start` | `AppServerConnection.handleTurnStart()` | Validates thread runtime, normalizes `UserInput[]`, and calls backend `turnStart()`. |
+| `turn/interrupt` | `AppServerConnection.handleTurnInterrupt()` | Calls backend `turnInterrupt()` and finalizes active turn state. |
+| Backend notifications | `BackendAppServerEvent.kind === "notification"` | Relayed as app-server notifications (`thread/*`, `turn/*`, `item/*`). |
+| Backend server requests | `BackendAppServerEvent.kind === "serverRequest"` | Relayed to GUI with adapter-owned request ids, resolved back via `resolveServerRequest()`. |
+| Backend errors/disconnects | `BackendAppServerEvent.kind` is `error` or `disconnect` | Published as explicit `backend/error` and `backend/disconnect`. |
 
 ## Input Mapping
 
@@ -84,14 +81,14 @@ Status:
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
-| `model/list` | `backend.listModels()` via `AppServerConnection` | Translated from Pi model summaries to Codex model shapes. |
-| `turn/start` model selection | `backend.setModel()` | If a model is requested, it is set before prompting. |
-| `backend.getCapabilities()` | `backend-pi` capability snapshot | Currently reports image, thinking, and parallel tool support. |
-| `backend.respondToElicitation()` | `backend-pi` process bridge | Wired through outbound `item/tool/requestUserInput` server requests and inbound JSON-RPC responses. |
+| `model/list` | `BackendRouter.listModels()` via `AppServerConnection` | Aggregated across healthy backends with backend-prefixed ids. |
+| `turn/start` model selection | `BackendRouter.resolveModelSelection()` + backend `turnStart()` | Routed ids resolve to backend ownership and raw backend model id. |
+| `BackendRouter` default model | Router-owned arbitration | At most one aggregated `isDefault: true` is exposed. |
+| Backend request/response relay | `AppServerConnection` + backend `resolveServerRequest()` | Supports backend-originated server requests independently of backend type. |
 
 ## `command/exec`
 
-`command/exec` is adapter-native in codapter and is not routed through Pi.
+`command/exec` is adapter-native in codapter and is not routed through Pi or Codex backends.
 
 | Codex concept | Current codapter mapping | Notes |
 | --- | --- | --- |
@@ -113,23 +110,33 @@ Behavior notes:
 | --- | --- | --- |
 | `IBackend` | `packages/core/src/backend.ts` | Codapter’s backend contract is the adapter-facing abstraction. |
 | `PiBackend` | `packages/backend-pi/src/index.ts` | Real subprocess-backed backend implementation. |
-| Session identity | Opaque `sessionId` values | The adapter stores opaque ids and does not expose Pi session file paths. |
-| Session history | Pi JSONL session files | Reconstructed through the backend session store. |
-| Prompt events | `text_delta`, `thinking_delta`, `tool_start`, `tool_update`, `tool_end`, `message_end`, `token_usage`, `elicitation_request` | These are bridged into `BackendEvent` and then into Codex notifications. |
+| Thread handle identity | Opaque backend `threadHandle` values | Stored in registry as internal metadata. |
+| `thread/read` | Backend-owned hydration in `PiBackend.threadRead()` | Returns backend-neutral `Turn[]`. |
+| Event stream | Pi notifications mapped to `BackendAppServerEvent` | Routed through `AppServerConnection` publish path. |
+
+## Codex Backend
+
+| Codex concept | Current codapter mapping | Notes |
+| --- | --- | --- |
+| `CodexBackend` | `packages/backend-codex/src/index.ts` | Proxies upstream `codex app-server` over stdio. |
+| Model id rewrite | Routed `<backend>::<raw>` ids | Rewrites inbound/outbound model ids between adapter and upstream Codex. |
+| Server-request relay | Upstream JSON-RPC request/response mapping | Request ids are tracked and resolved through adapter relay. |
+| Websocket transport | Deterministic defer/reject path | Websocket mode is explicitly deferred in this topic. |
 
 ## Unsupported Or Partially Implemented Areas
 
 | Codex concept | Current state | Notes |
 | --- | --- | --- |
 | Worktree RPCs (`create-worktree`, `delete-worktree`, `resolve-worktree-for-thread`, `worktree-cleanup-inputs`) | Not implemented | They currently return `Method not found`. |
-| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Pi-backed elicitation implemented | `item/tool/requestUserInput` is fully wired as a server-request round-trip. MCP server elicitation is still unsupported. |
+| Elicitation server requests (`item/tool/requestUserInput`, `mcpServer/elicitation/request`) | Pi-backed elicitation implemented | `item/tool/requestUserInput` is wired as a server-request round-trip; MCP server elicitation is unsupported. |
+| Codex websocket transport | Deferred | Explicit deterministic rejection path is implemented. |
 | Legacy `codex/event/*` compatibility | Not implemented as a public surface | The current implementation targets the typed app-server surface instead. |
 | Remote deployment flow | Supported only through the CLI listener transport | There is no separate remote orchestration layer in codapter. |
 
 ## Current Gaps
 
-The implementation is usable for threads, turns, Pi-backed replies, standalone commands, and Pi-backed user-input prompts. The main remaining gaps are:
+The implementation is usable for routed Pi/Codex thread operations, turns, and standalone commands. The main remaining gaps are:
 
 1. Worktree RPCs are still unsupported.
-2. Turn-level diff/plan notifications are not emitted.
+2. Codex websocket transport is deferred.
 3. Remote tunnel orchestration is still external to codapter.

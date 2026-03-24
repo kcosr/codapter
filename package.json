@@ -11,10 +11,12 @@
     "build": "tsc -b",
     "build:dist": "npm run build && node scripts/build-dist.mjs",
     "check": "npm run build && npm run lint && npm run test",
+    "gui:audit:collect": "node scripts/gui-audit.mjs collect",
+    "gui:audit:compare": "node scripts/gui-audit.mjs compare",
     "lint": "biome check .",
     "prepare": "husky",
     "test": "vitest run --passWithNoTests",
-    "test:smoke": "PI_SMOKE_TEST=1 vitest run test/smoke/"
+    "test:smoke": "PI_SMOKE_TEST=1 CODEX_SMOKE_TEST=1 vitest run test/smoke/"
   },
   "lint-staged": {
     "*.{js,mjs,cjs,ts,tsx,json,md}": ["biome check --write --no-errors-on-unmatched"]

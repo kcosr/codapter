@@ -5,6 +5,10 @@
     "outDir": "./dist",
     "tsBuildInfoFile": "./dist/.tsbuildinfo"
   },
-  "references": [{ "path": "../core" }, { "path": "../backend-pi" }],
+  "references": [
+    { "path": "../core" },
+    { "path": "../backend-pi" },
+    { "path": "../backend-codex" }
+  ],
   "include": ["src/**/*.ts"]
 }

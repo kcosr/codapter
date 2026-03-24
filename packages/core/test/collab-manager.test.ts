@@ -1,20 +1,39 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BackendEvent, IBackend } from "../src/backend.js";
+import { BackendRouter } from "../src/backend-router.js";
+import { parseBackendModelId } from "../src/backend.js";
+import type { BackendAppServerEvent, BackendEvent, IBackend } from "../src/backend.js";
 import { CollabManager } from "../src/collab-manager.js";
 import type { CollabManagerNotificationSink } from "../src/collab-manager.js";
 import type { CollabManagerCreateChildThreadInput } from "../src/collab-manager.js";
 
 class TestBackend implements IBackend {
-  private readonly listeners = new Map<string, Set<(event: BackendEvent) => void>>();
+  public readonly backendType: string;
+  private readonly listeners = new Map<string, Set<(event: BackendAppServerEvent) => void>>();
   private sessionCounter = 0;
   public prompts: Array<{ sessionId: string; turnId: string; text: string }> = [];
   public abortedSessionIds: string[] = [];
   public disposedSessionIds: string[] = [];
+  public threadStartCalls: Array<{ threadId: string; model: string | null }> = [];
+  public threadForkCalls: Array<{ sourceThreadHandle: string; model: string | null }> = [];
+
+  constructor(backendType = "pi") {
+    this.backendType = backendType;
+  }
 
   async initialize() {}
   async dispose() {}
   isAlive() {
     return true;
+  }
+  parseModelSelection(model: string | null | undefined) {
+    if (!model) {
+      return null;
+    }
+    const parsed = parseBackendModelId(model);
+    if (!parsed || parsed.backendType !== this.backendType) {
+      return null;
+    }
+    return parsed;
   }
   async createSession() {
     this.sessionCounter += 1;
@@ -57,8 +76,80 @@ class TestBackend implements IBackend {
     };
   }
   async respondToElicitation() {}
-  onEvent(sessionId: string, listener: (event: BackendEvent) => void) {
-    const listeners = this.listeners.get(sessionId) ?? new Set<(event: BackendEvent) => void>();
+  async threadStart(input: {
+    threadId: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    this.threadStartCalls.push({ threadId: input.threadId, model: input.model });
+    const sessionId = await this.createSession();
+    return {
+      threadHandle: sessionId,
+      path: `/sessions/${sessionId}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadResume(input: {
+    threadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    return {
+      threadHandle: input.threadHandle,
+      path: `/sessions/${input.threadHandle}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadFork(input: {
+    sourceThreadHandle: string;
+    model: string | null;
+    reasoningEffort: string | null;
+  }) {
+    this.threadForkCalls.push({
+      sourceThreadHandle: input.sourceThreadHandle,
+      model: input.model,
+    });
+    const sessionId = await this.forkSession(input.sourceThreadHandle);
+    return {
+      threadHandle: sessionId,
+      path: `/sessions/${sessionId}.jsonl`,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort,
+    };
+  }
+  async threadRead(input: { threadHandle: string }) {
+    return {
+      threadHandle: input.threadHandle,
+      title: null,
+      model: null,
+      turns: [],
+    };
+  }
+  async threadArchive(input: { threadHandle: string }) {
+    await this.disposeSession(input.threadHandle);
+  }
+  async threadSetName() {}
+  async turnStart(input: {
+    threadHandle: string;
+    turnId: string;
+    input: Array<{ text?: string; type: string }>;
+  }) {
+    const text = input.input
+      .filter((entry) => entry.type === "text")
+      .map((entry) => entry.text ?? "")
+      .join("\n");
+    this.prompts.push({ sessionId: input.threadHandle, turnId: input.turnId, text });
+    return { accepted: true as const };
+  }
+  async turnInterrupt(input: { threadHandle: string }) {
+    this.abortedSessionIds.push(input.threadHandle);
+  }
+  async resolveServerRequest() {}
+  onEvent(sessionId: string, listener: (event: BackendAppServerEvent) => void) {
+    const listeners =
+      this.listeners.get(sessionId) ?? new Set<(event: BackendAppServerEvent) => void>();
     listeners.add(listener);
     this.listeners.set(sessionId, listeners);
     return {
@@ -70,7 +161,56 @@ class TestBackend implements IBackend {
 
   emit(sessionId: string, event: BackendEvent) {
     for (const listener of this.listeners.get(sessionId) ?? []) {
-      listener(event);
+      if (event.type === "text_delta") {
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "item/agentMessage/delta",
+          params: { threadId: sessionId, turnId: event.turnId, itemId: "msg", delta: event.delta },
+        });
+        continue;
+      }
+      if (event.type === "message_end") {
+        if (typeof event.text === "string" && event.text.length > 0) {
+          listener({
+            kind: "notification",
+            threadHandle: sessionId,
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: sessionId,
+              turnId: event.turnId,
+              itemId: "msg",
+              delta: event.text,
+            },
+          });
+        }
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "turn/completed",
+          params: {
+            threadId: sessionId,
+            turn: { id: event.turnId, items: [], status: "completed", error: null },
+          },
+        });
+        continue;
+      }
+      if (event.type === "error") {
+        listener({
+          kind: "notification",
+          threadHandle: sessionId,
+          method: "turn/completed",
+          params: {
+            threadId: sessionId,
+            turn: {
+              id: event.turnId,
+              items: [],
+              status: "failed",
+              error: { message: event.message, codexErrorInfo: null, additionalDetails: null },
+            },
+          },
+        });
+      }
     }
   }
 }
@@ -90,7 +230,7 @@ function createManager(options: {
   const childThreadInputs: CollabManagerCreateChildThreadInput[] = [];
 
   const manager = new CollabManager({
-    backend,
+    backendRouter: new BackendRouter([backend]),
     notifySink:
       options.notifySink ??
       ({
@@ -101,8 +241,11 @@ function createManager(options: {
     resolveParentTurnId(threadId) {
       return `turn:${threadId}`;
     },
-    resolveThreadSessionId(threadId) {
+    resolveThreadHandle(threadId) {
       return `session:${threadId}`;
+    },
+    resolveThreadBackendType() {
+      return backend.backendType;
     },
     async createChildThread(input) {
       childThreadIds.push(input.threadId);
@@ -171,6 +314,69 @@ describe("CollabManager", () => {
     expect(statusChanges).toEqual(["running", "completed"]);
   });
 
+  it("does not synthesize a duplicate parent summary when wait_agent returns child output", async () => {
+    const { backend, manager, notifications, parentThreadId } = createManager({
+      config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },
+    });
+
+    const spawned = await spawnAgent(manager, parentThreadId);
+    notifications.length = 0;
+
+    const prompt = backend.prompts.at(-1);
+    expect(prompt).toBeDefined();
+    backend.emit(prompt?.sessionId ?? "", {
+      type: "text_delta",
+      sessionId: prompt?.sessionId ?? "",
+      turnId: prompt?.turnId ?? "",
+      delta: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+    });
+    backend.emit(prompt?.sessionId ?? "", {
+      type: "message_end",
+      sessionId: prompt?.sessionId ?? "",
+      turnId: prompt?.turnId ?? "",
+    });
+
+    await expect(
+      manager.wait({
+        parentThreadId,
+        ids: [spawned.agent_id],
+        timeout_ms: 5,
+      })
+    ).resolves.toEqual({
+      status: {
+        [spawned.agent_id]: "completed",
+      },
+      messages: {
+        [spawned.agent_id]: "The output is:\n\n```\n/Users/kcassidy/codapter\n```",
+      },
+      timed_out: false,
+    });
+
+    const completedItems = notifications
+      .filter((entry) => entry.method === "item/completed")
+      .map((entry) => entry.params);
+
+    expect(completedItems).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          item: expect.objectContaining({
+            type: "collabAgentToolCall",
+            tool: "wait",
+          }),
+        }),
+      ])
+    );
+    expect(
+      completedItems.some(
+        (entry) =>
+          typeof entry?.item?.type === "string" &&
+          entry.item.type === "agentMessage" &&
+          typeof entry.item.text === "string" &&
+          entry.item.text.includes("Robie replied:")
+      )
+    ).toBe(false);
+  });
+
   it("transitions pendingInit to running to errored", async () => {
     const { backend, manager, parentThreadId } = createManager({
       config: { minTimeoutMs: 1, defaultTimeoutMs: 5, maxTimeoutMs: 10 },
@@ -215,6 +421,25 @@ describe("CollabManager", () => {
         message: "second",
       })
     ).rejects.toThrow("Maximum collab agent count reached");
+  });
+
+  it("uses threadStart instead of threadFork for Codex fork_context spawns", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+
+    await manager.spawn({
+      parentThreadId,
+      message: "delegate with context",
+      forkContext: true,
+      model: "codex::gpt-5.4-mini",
+    });
+
+    expect(backend.threadForkCalls).toEqual([]);
+    expect(backend.threadStartCalls).toEqual([
+      expect.objectContaining({
+        model: "gpt-5.4-mini",
+      }),
+    ]);
   });
 
   it("rejects spawns when maxDepth is reached", async () => {
@@ -552,5 +777,36 @@ describe("CollabManager", () => {
         preview: "run date",
       }),
     ]);
+  });
+
+  it("rejects combined message and items for Codex-backed spawns", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+
+    await expect(
+      manager.spawn({
+        parentThreadId,
+        message: "run date",
+        items: [{ type: "text", text: "run date", text_elements: [] }],
+      })
+    ).rejects.toThrow("Provide either message or items, but not both");
+  });
+
+  it("rejects combined message and items for Codex-backed send_input", async () => {
+    const backend = new TestBackend("codex");
+    const { manager, parentThreadId } = createManager({ backend });
+    const spawned = await manager.spawn({
+      parentThreadId,
+      message: "run date",
+    });
+
+    await expect(
+      manager.sendInput({
+        parentThreadId,
+        id: spawned.agent_id,
+        message: "follow up",
+        items: [{ type: "text", text: "follow up", text_elements: [] }],
+      })
+    ).rejects.toThrow("Provide either message or items, but not both");
   });
 });

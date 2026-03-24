@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -40,6 +40,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "    argv: process.argv.slice(2),",
     "    collabSocketPath: process.env.CODAPTER_COLLAB_UDS ?? null,",
     "    parentThreadId: process.env.CODAPTER_COLLAB_PARENT_THREAD ?? null,",
+    "    availableModelsDescription: process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION ?? null,",
     "  }), 'utf8');",
     "}",
     "",
@@ -288,6 +289,60 @@ async function createMockPiScript(rootDir: string): Promise<string> {
   return scriptPath;
 }
 
+async function createModelProbeScript(rootDir: string): Promise<string> {
+  const scriptPath = join(rootDir, "mock-pi-models-only.mjs");
+  const script = [
+    "import { writeFile } from 'node:fs/promises';",
+    "import { StringDecoder } from 'node:string_decoder';",
+    "",
+    "const capturePath = process.env.CODAPTER_CAPTURE_PROCESS_PATH;",
+    "const decoder = new StringDecoder('utf8');",
+    "let buffer = '';",
+    "",
+    "if (capturePath) {",
+    "  await writeFile(capturePath, `${process.pid}\\n`, { flag: 'a' });",
+    "}",
+    "",
+    "function write(value) {",
+    "  process.stdout.write(JSON.stringify(value) + '\\n');",
+    "}",
+    "",
+    "function response(id, command, data) {",
+    "  write({ id, type: 'response', command, success: true, ...(data === undefined ? {} : { data }) });",
+    "}",
+    "",
+    "process.stdin.on('data', (chunk) => {",
+    "  buffer += decoder.write(chunk);",
+    "  const lines = buffer.split('\\n');",
+    "  buffer = lines.pop() ?? '';",
+    "  for (const line of lines) {",
+    "    if (!line.trim()) continue;",
+    "    const command = JSON.parse(line);",
+    "    if (command.type === 'get_state') {",
+    "      response(command.id, 'get_state', {",
+    "        sessionId: 'models-only',",
+    "        sessionFile: null,",
+    "        sessionName: null,",
+    "        model: { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
+    "      });",
+    "      continue;",
+    "    }",
+    "    if (command.type === 'get_available_models') {",
+    "      setTimeout(() => {",
+    "        response(command.id, 'get_available_models', {",
+    "          models: [",
+    "            { provider: 'anthropic', id: 'claude-opus-4-6', name: 'Claude Opus 4.6', reasoning: true, input: ['text', 'image'], contextWindow: 1000000 },",
+    "          ],",
+    "        });",
+    "      }, 50);",
+    "    }",
+    "  }",
+    "});",
+  ];
+  await writeFile(scriptPath, `${script.join("\n")}\n`, "utf8");
+  return scriptPath;
+}
+
 async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 3000): Promise<T> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -340,80 +395,126 @@ describe("PiBackend", () => {
       supportedToolTypes: [],
     });
 
-    const sessionId = await backend.createSession();
-    expect(sessionId.startsWith("pi_session_")).toBe(true);
-
-    const events: Array<{
-      type: string;
-      turnId?: string;
-      requestId?: string;
-      usage?: { modelContextWindow: number | null; total: number };
-    }> = [];
-    const subscription = backend.onEvent(sessionId, (event) => {
-      events.push(event);
-    });
-
     const selectedModel = models.at(1);
     if (!selectedModel) {
       throw new Error("Expected a second mock model");
     }
 
-    await backend.setSessionName(sessionId, "Primary session");
-    await backend.setModel(sessionId, selectedModel.id);
-    await backend.setModel(sessionId, "gpt-5.3-codex");
-    await backend.prompt(sessionId, "turn_1", "hello world", [
-      {
-        type: "image",
-        data: Buffer.from("image payload").toString("base64"),
-        mimeType: "image/png",
-      },
-    ]);
+    const threadId = "thread-pi-1";
+    const started = await backend.threadStart({
+      threadId,
+      cwd: sessionDir,
+      model: selectedModel.id,
+      reasoningEffort: "medium",
+    });
+    const threadHandle = started.threadHandle;
+    expect(threadHandle.startsWith("pi_session_")).toBe(true);
 
-    const elicitation = await waitFor(
-      () =>
-        events.find((event) => event.type === "elicitation_request") as
-          | { requestId: string }
-          | undefined
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const serverRequests: Array<{ requestId: string | number; method: string; params: unknown }> =
+      [];
+    const subscription = backend.onEvent(threadHandle, (event) => {
+      if (event.kind === "notification") {
+        notifications.push({ method: event.method, params: event.params });
+        return;
+      }
+      if (event.kind === "serverRequest") {
+        serverRequests.push({
+          requestId: event.requestId,
+          method: event.method,
+          params: event.params,
+        });
+      }
+    });
+
+    await backend.threadSetName({ threadId, threadHandle, name: "Primary session" });
+    await backend.setModel(threadHandle, selectedModel.id);
+    await backend.setModel(threadHandle, "gpt-5.3-codex");
+    await backend.turnStart({
+      threadId,
+      threadHandle,
+      turnId: "turn_1",
+      cwd: sessionDir,
+      input: [{ type: "text", text: "hello world", text_elements: [] }],
+      model: null,
+      reasoningEffort: "medium",
+    });
+
+    const elicitation = await waitFor(() =>
+      serverRequests.find((event) => event.method === "item/tool/requestUserInput")
     );
     expect(elicitation).toBeDefined();
 
-    await backend.respondToElicitation(sessionId, elicitation.requestId, { confirmed: true });
+    await backend.resolveServerRequest({
+      threadId,
+      threadHandle,
+      requestId: elicitation.requestId,
+      response: { result: { confirmed: true } },
+    });
     const tokenUsageEvent = await waitFor(
       () =>
-        events.find((event) => event.type === "token_usage") as
-          | { usage?: { modelContextWindow: number | null; total: number } }
+        notifications.find((event) => event.method === "thread/tokenUsage/updated") as
+          | {
+              params?: {
+                tokenUsage?: { modelContextWindow: number | null; last?: { totalTokens?: number } };
+              };
+            }
           | undefined
     );
 
-    expect(events.some((event) => event.type === "text_delta")).toBe(true);
-    expect(events.some((event) => event.type === "tool_start")).toBe(true);
-    expect(events.some((event) => event.type === "tool_update")).toBe(true);
-    expect(events.some((event) => event.type === "tool_end")).toBe(true);
-    expect(events.filter((event) => event.type === "message_end")).toHaveLength(1);
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        type: "message_end",
-        text: "response-1",
-      })
-    );
+    expect(notifications.some((event) => event.method === "item/agentMessage/delta")).toBe(true);
     expect(
-      events
-        .filter(
-          (event) =>
-            event.type === "text_delta" ||
-            event.type === "tool_start" ||
-            event.type === "tool_update" ||
-            event.type === "tool_end" ||
-            event.type === "message_end"
-        )
-        .every((event) => event.turnId === "turn_1")
+      notifications.some(
+        (event) =>
+          event.method === "item/started" &&
+          (event.params as { item?: { type?: string } }).item?.type === "userMessage"
+      )
+    ).toBe(false);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/completed" &&
+          (event.params as { item?: { type?: string } }).item?.type === "userMessage"
+      )
+    ).toBe(false);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/started" &&
+          (event.params as { item?: { type?: string } }).item?.type === "commandExecution"
+      )
     ).toBe(true);
-    expect(tokenUsageEvent.usage).toMatchObject({
+    expect(
+      notifications.some((event) => event.method === "item/commandExecution/outputDelta")
+    ).toBe(true);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "item/completed" &&
+          (event.params as { item?: { type?: string } }).item?.type === "commandExecution"
+      )
+    ).toBe(true);
+    expect(
+      notifications.some(
+        (event) =>
+          event.method === "turn/completed" &&
+          (event.params as { turn?: { status?: string } }).turn?.status === "completed"
+      )
+    ).toBe(true);
+    expect(
+      (
+        tokenUsageEvent.params as {
+          tokenUsage: { modelContextWindow: number | null; last: { totalTokens: number } };
+        }
+      ).tokenUsage
+    ).toMatchObject({
       modelContextWindow: 272000,
-      total: 12,
+      last: {
+        totalTokens: 12,
+      },
     });
 
-    const history = await backend.readSessionHistory(sessionId);
+    const history = await backend.readSessionHistory(threadHandle);
     expect(history.some((message) => message.role === "user")).toBe(true);
     expect(history.some((message) => message.role === "assistant")).toBe(true);
     expect(history).toContainEqual(
@@ -428,19 +529,71 @@ describe("PiBackend", () => {
       })
     );
     expect(history.some((message) => message.role === "system")).toBe(true);
+    const threadRead = await backend.threadRead({
+      threadId,
+      threadHandle,
+      includeTurns: true,
+      cwd: sessionDir,
+    });
+    expect(threadRead.threadHandle).toBe(threadHandle);
+    expect(threadRead.turns[0]?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "userMessage",
+          content: [{ type: "text", text: "hello world" }],
+        }),
+        expect.objectContaining({
+          type: "commandExecution",
+          command: "echo hi",
+          status: "completed",
+          aggregatedOutput: "hi",
+          exitCode: 0,
+        }),
+        expect.objectContaining({
+          type: "agentMessage",
+          text: "response-1",
+        }),
+      ])
+    );
+    expect(
+      threadRead.turns[0]?.items.filter(
+        (item) =>
+          item.type === "agentMessage" &&
+          typeof item.text === "string" &&
+          (item.text.includes('"toolCallId"') || item.text.includes('"type":"toolCall"'))
+      )
+    ).toEqual([]);
 
-    const forkedSessionId = await backend.forkSession(sessionId);
-    expect(forkedSessionId).not.toBe(sessionId);
-    const forkedHistory = await backend.readSessionHistory(forkedSessionId);
+    const forked = await backend.threadFork({
+      threadId: "thread-pi-fork",
+      sourceThreadId: threadId,
+      sourceThreadHandle: threadHandle,
+      cwd: sessionDir,
+      model: null,
+      reasoningEffort: null,
+    });
+    expect(forked.threadHandle).not.toBe(threadHandle);
+    const forkedHistory = await backend.readSessionHistory(forked.threadHandle);
     expect(forkedHistory).toEqual(expect.any(Array));
 
     subscription.dispose();
-    const eventCount = events.length;
-    await backend.prompt(sessionId, "turn_2", "follow-up prompt");
+    const eventCount = notifications.length + serverRequests.length;
+    await backend.turnStart({
+      threadId,
+      threadHandle,
+      turnId: "turn_2",
+      cwd: sessionDir,
+      input: [{ type: "text", text: "follow-up prompt", text_elements: [] }],
+      model: null,
+      reasoningEffort: null,
+    });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(events.length).toBe(eventCount);
+    expect(notifications.length + serverRequests.length).toBe(eventCount);
 
-    await backend.disposeSession(sessionId);
+    await backend.threadArchive({
+      threadId,
+      threadHandle,
+    });
     await backend.dispose();
 
     const logRecords = (await readFile(logFilePath, "utf8"))
@@ -494,10 +647,165 @@ describe("PiBackend", () => {
       args: [scriptPath, sessionDir],
     });
     await reopened.initialize();
-    await expect(reopened.resumeSession(sessionId)).resolves.toBe(sessionId);
-    const resumedHistory = await reopened.readSessionHistory(sessionId);
+    await expect(
+      reopened.threadResume({
+        threadId,
+        threadHandle,
+        cwd: sessionDir,
+        model: null,
+        reasoningEffort: null,
+      })
+    ).resolves.toMatchObject({
+      threadHandle,
+    });
+    const resumedHistory = await reopened.readSessionHistory(threadHandle);
     expect(resumedHistory).toEqual(expect.any(Array));
     await reopened.dispose();
+  });
+
+  it("loads static available models from a file without starting the Pi process", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-static-"));
+    const sessionDir = join(rootDir, "sessions");
+    const staticModelsPath = join(rootDir, "models.json");
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      staticModelsPath,
+      JSON.stringify({
+        models: [
+          {
+            provider: "anthropic",
+            id: "claude-opus-4-6",
+            name: "Claude Opus 4.6",
+            reasoning: true,
+            input: ["text", "image"],
+            contextWindow: 1000000,
+          },
+        ],
+      }),
+      "utf8"
+    );
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: "definitely-not-a-real-command",
+      staticAvailableModelsPath: staticModelsPath,
+    });
+
+    try {
+      await backend.initialize();
+      await expect(backend.listModels()).resolves.toEqual([
+        expect.objectContaining({
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+          displayName: "Claude Opus 4.6",
+          defaultReasoningEffort: "medium",
+        }),
+      ]);
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes the active child prompt when threadRead resumes before completion", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-live-read-"));
+    const sessionDir = join(rootDir, "sessions");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+    });
+
+    try {
+      await backend.initialize();
+      const started = await backend.threadStart({
+        threadId: "thread-live-read",
+        cwd: sessionDir,
+        model: "anthropic/claude-opus-4-6",
+        reasoningEffort: "medium",
+      });
+
+      await backend.turnStart({
+        threadId: "thread-live-read",
+        threadHandle: started.threadHandle,
+        turnId: "turn-live-read",
+        cwd: sessionDir,
+        input: [
+          {
+            type: "text",
+            text: "Run the `date` command and report the output.",
+            text_elements: [],
+          },
+        ],
+        model: null,
+        reasoningEffort: null,
+      });
+
+      const threadRead = await backend.threadRead({
+        threadId: "thread-live-read",
+        threadHandle: started.threadHandle,
+        includeTurns: true,
+        cwd: sessionDir,
+      });
+
+      expect(threadRead.turns).toHaveLength(1);
+      expect(
+        threadRead.turns[0]?.items.filter(
+          (item) =>
+            item.type === "userMessage" &&
+            JSON.stringify(item.content) ===
+              JSON.stringify([
+                { type: "text", text: "Run the `date` command and report the output." },
+              ])
+        )
+      ).toHaveLength(1);
+      expect(threadRead.turns[0]?.status).toBe("inProgress");
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dedupes concurrent available-model probes into a single Pi process launch", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-model-dedupe-"));
+    const sessionDir = join(rootDir, "sessions");
+    const capturePath = join(rootDir, "model-probes.log");
+    await mkdir(sessionDir, { recursive: true });
+    const scriptPath = await createModelProbeScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath],
+      env: {
+        ...process.env,
+        CODAPTER_CAPTURE_PROCESS_PATH: capturePath,
+      },
+    });
+
+    try {
+      await backend.initialize();
+      const [first, second] = await Promise.all([backend.listModels(), backend.listModels()]);
+      expect(first).toEqual(second);
+      expect(first).toEqual([
+        expect.objectContaining({
+          id: "anthropic/claude-opus-4-6",
+          model: "anthropic/claude-opus-4-6",
+        }),
+      ]);
+
+      const launches = (await readFile(capturePath, "utf8"))
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      expect(launches).toHaveLength(1);
+    } finally {
+      await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 
   it("passes collab launch config and extension path to child processes", async () => {
@@ -525,6 +833,8 @@ describe("PiBackend", () => {
       await backend.createSession({
         threadId: "thread-parent-123",
         collabSocketPath: "/tmp/codapter-collab-test.sock",
+        availableModelsDescription:
+          "Available models (use the model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- gpt-5.4: medium",
       });
     } finally {
       await backend.dispose();
@@ -534,9 +844,12 @@ describe("PiBackend", () => {
       argv: string[];
       collabSocketPath: string | null;
       parentThreadId: string | null;
+      availableModelsDescription: string | null;
     };
     expect(launch.collabSocketPath).toBe("/tmp/codapter-collab-test.sock");
     expect(launch.parentThreadId).toBe("thread-parent-123");
+    expect(launch.availableModelsDescription).toContain("pi::anthropic/claude-opus-4-6");
+    expect(launch.availableModelsDescription).toContain("gpt-5.4");
     expect(launch.argv).toContain("--extension");
     expect(launch.argv).toContain(extensionPath);
   });

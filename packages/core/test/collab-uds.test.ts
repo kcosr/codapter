@@ -80,6 +80,104 @@ describe("CollabUdsListener", () => {
     });
   });
 
+  it("normalizes collab/spawn items into a prompt and keeps structured inputs", async () => {
+    let captured: unknown;
+    const listener = new CollabUdsListener({
+      collabManager: {
+        async spawn(request) {
+          captured = request;
+          return { agent_id: "agent-1", nickname: "Robie" };
+        },
+      } as unknown as CollabManager,
+      validateParentThread() {},
+    });
+    listeners.push(listener);
+    await listener.start();
+
+    const response = await callSocket(listener.socketPath, {
+      id: 3,
+      method: "collab/spawn",
+      params: {
+        parentThreadId: "thread-1",
+        items: [
+          {
+            type: "text",
+            text: "delegate",
+          },
+        ],
+      },
+    });
+
+    expect(response).toEqual({
+      id: 3,
+      result: {
+        agent_id: "agent-1",
+        nickname: "Robie",
+      },
+    });
+    expect(captured).toEqual({
+      parentThreadId: "thread-1",
+      message: "delegate",
+      items: [
+        {
+          type: "text",
+          text: "delegate",
+          text_elements: [],
+        },
+      ],
+    });
+  });
+
+  it("prefers message text when both message and items are provided", async () => {
+    let captured: unknown;
+    const listener = new CollabUdsListener({
+      collabManager: {
+        async sendInput(request) {
+          captured = request;
+          return { submission_id: "submission-1" };
+        },
+      } as unknown as CollabManager,
+      validateParentThread() {},
+    });
+    listeners.push(listener);
+    await listener.start();
+
+    const response = await callSocket(listener.socketPath, {
+      id: 4,
+      method: "collab/sendInput",
+      params: {
+        parentThreadId: "thread-1",
+        id: "agent-1",
+        message: "follow up",
+        items: [
+          {
+            type: "text",
+            text: "follow up",
+          },
+        ],
+      },
+    });
+
+    expect(response).toEqual({
+      id: 4,
+      result: {
+        submission_id: "submission-1",
+      },
+    });
+    expect(captured).toEqual({
+      parentThreadId: "thread-1",
+      id: "agent-1",
+      message: "follow up",
+      items: [
+        {
+          type: "text",
+          text: "follow up",
+          text_elements: [],
+        },
+      ],
+    });
+  });
+
   it("rejects invalid parentThreadId bindings", async () => {
     const listener = new CollabUdsListener({
       collabManager: {} as CollabManager,

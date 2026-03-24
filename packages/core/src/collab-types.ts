@@ -1,3 +1,5 @@
+import type { UserInput } from "./protocol.js";
+
 export type CollabAgentStatus =
   | "pendingInit"
   | "running"
@@ -44,6 +46,7 @@ export interface CollabAgent {
 export interface CollabSpawnRequest {
   parentThreadId: string;
   message: string;
+  items?: readonly UserInput[];
   agentType?: string;
   model?: string;
   reasoningEffort?: string;
@@ -59,6 +62,7 @@ export interface CollabSendInputRequest {
   parentThreadId: string;
   id: string;
   message: string;
+  items?: readonly UserInput[];
   interrupt?: boolean;
 }
 

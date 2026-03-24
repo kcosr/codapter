@@ -74,16 +74,19 @@ Environment override:
 
 ## Backend Notes
 
-The current backend implementation is Pi-backed.
+Codapter routes thread and turn operations through `BackendRouter` into registered `IBackend` implementations.
 
-- Session ids are opaque adapter ids.
-- Session state is persisted under `~/.local/share/codapter/backend-pi/` by default.
+- Model ids in picker responses are backend-routed: Pi entries are prefixed (`pi::...`), while Codex entries use raw native ids like `gpt-5.4`.
+- Thread ownership is persisted in the registry as `{ backendType, backendSessionId }`.
+- Pi session state is persisted under `~/.local/share/codapter/backend-pi/` by default.
 - Pi subprocesses are spawned on demand and shut down with the adapter.
+- Codex backend startup is optional (`CODAPTER_CODEX_DISABLE`), while Pi backend startup is currently required by the CLI bootstrap.
 - `turn/start` streams backend events into Codex notifications.
-- `command/exec` runs locally in the adapter, not through Pi.
+- `command/exec` runs locally in the adapter, not through Pi or Codex backends.
 
 ## Current Limitations
 
 - Pi-backed elicitation is supported through `item/tool/requestUserInput`. MCP server elicitation is still unsupported.
 - Remote tunnel orchestration is not automated by codapter. Use your own SSH or port-forward setup if you want to connect to a WebSocket listener remotely.
-- The current backend implementation is Pi-specific.
+- Codex websocket transport is deferred in this topic and currently returns a deterministic reject path.
+- Pi-backed threads can spawn Codex sub-agents, but Codex-backed threads cannot spawn Pi sub-agents.

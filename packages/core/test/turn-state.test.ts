@@ -166,6 +166,27 @@ describe("TurnStateMachine", () => {
     });
   });
 
+  it("can record a user message without live item notifications", async () => {
+    const { machine, notifications } = createMachine();
+
+    await machine.emitUserMessage([{ type: "text", text: "hello" }], { notify: false });
+
+    expect(machine.snapshot).toMatchObject({
+      items: [
+        {
+          type: "userMessage",
+          content: [{ type: "text", text: "hello" }],
+        },
+      ],
+    });
+    expect(notifications.some((notification) => notification.method === "item/started")).toBe(
+      false
+    );
+    expect(notifications.some((notification) => notification.method === "item/completed")).toBe(
+      false
+    );
+  });
+
   it("hydrates file changes for write tools and emits final output deltas on tool_end", async () => {
     const { machine, notifications } = createMachine();
 

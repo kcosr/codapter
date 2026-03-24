@@ -3,6 +3,7 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/backend-pi" },
+    { "path": "./packages/backend-codex" },
     { "path": "./packages/cli" },
     { "path": "./packages/collab-extension" }
   ]

@@ -238,6 +238,23 @@ export class ThreadRegistry {
     return this.entries.get(threadId) ?? null;
   }
 
+  async findByBackendSessionId(
+    backendSessionId: string,
+    backendType?: string | null
+  ): Promise<ThreadRegistryEntry | null> {
+    await this.load();
+    for (const entry of this.entries.values()) {
+      if (entry.backendSessionId !== backendSessionId) {
+        continue;
+      }
+      if (backendType && entry.backendType !== backendType) {
+        continue;
+      }
+      return entry;
+    }
+    return null;
+  }
+
   async create(input: CreateThreadRegistryEntry): Promise<ThreadRegistryEntry> {
     await this.load();
 

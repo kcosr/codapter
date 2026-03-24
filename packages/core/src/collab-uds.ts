@@ -4,6 +4,7 @@ import net from "node:net";
 import { dirname } from "node:path";
 import type { CollabManager } from "./collab-manager.js";
 import { type JsonRpcRequest, failure, isJsonRpcRequest, success } from "./jsonrpc.js";
+import type { JsonValue, UserInput } from "./protocol.js";
 
 const JSON_RPC_PARSE_ERROR = -32700;
 const JSON_RPC_INVALID_REQUEST = -32600;
@@ -13,6 +14,79 @@ const JSON_RPC_INTERNAL_ERROR = -32603;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readTextElements(value: unknown): JsonValue[] {
+  return Array.isArray(value) ? (value as JsonValue[]) : [];
+}
+
+function parseUserInputItem(value: unknown): UserInput | null {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return null;
+  }
+
+  switch (value.type) {
+    case "text":
+      return typeof value.text === "string"
+        ? {
+            type: "text",
+            text: value.text,
+            text_elements: readTextElements(value.text_elements),
+          }
+        : null;
+    case "image":
+      if (typeof value.url === "string") {
+        return { type: "image", url: value.url };
+      }
+      return typeof value.image_url === "string" ? { type: "image", url: value.image_url } : null;
+    case "localImage":
+    case "local_image":
+      return typeof value.path === "string" ? { type: "localImage", path: value.path } : null;
+    case "skill":
+      return typeof value.name === "string" && typeof value.path === "string"
+        ? { type: "skill", name: value.name, path: value.path }
+        : null;
+    case "mention":
+      return typeof value.name === "string" && typeof value.path === "string"
+        ? { type: "mention", name: value.name, path: value.path }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function parseUserInputs(value: unknown): UserInput[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    const parsed = parseUserInputItem(entry);
+    return parsed ? [parsed] : [];
+  });
+}
+
+function textFromUserInputs(items: readonly UserInput[]): string {
+  return items
+    .flatMap((item) => {
+      switch (item.type) {
+        case "text":
+          return [item.text];
+        case "image":
+          return [`[image] ${item.url}`];
+        case "localImage":
+          return [`[local image] ${item.path}`];
+        case "skill":
+          return [`[skill:${item.name}] ${item.path}`];
+        case "mention":
+          return [`[mention:${item.name}] ${item.path}`];
+      }
+    })
+    .join("\n")
+    .trim();
 }
 
 export interface CollabUdsListenerOptions {
@@ -113,10 +187,12 @@ export class CollabUdsListener {
     this.options.validateParentThread(parentThreadId);
 
     switch (request.method) {
-      case "collab/spawn":
+      case "collab/spawn": {
+        const { message, items } = this.readPrompt(request.params);
         return await this.options.collabManager.spawn({
           parentThreadId,
-          message: this.requireString(request.params.message, "message"),
+          message,
+          ...(items.length > 0 ? { items } : {}),
           ...(typeof request.params.agent_type === "string"
             ? { agentType: request.params.agent_type }
             : {}),
@@ -128,15 +204,19 @@ export class CollabUdsListener {
             ? { forkContext: request.params.fork_context }
             : {}),
         });
-      case "collab/sendInput":
+      }
+      case "collab/sendInput": {
+        const { message, items } = this.readPrompt(request.params);
         return await this.options.collabManager.sendInput({
           parentThreadId,
           id: this.requireString(request.params.id, "id"),
-          message: this.requireString(request.params.message, "message"),
+          message,
+          ...(items.length > 0 ? { items } : {}),
           ...(typeof request.params.interrupt === "boolean"
             ? { interrupt: request.params.interrupt }
             : {}),
         });
+      }
       case "collab/wait":
         return await this.options.collabManager.wait({
           parentThreadId,
@@ -178,5 +258,20 @@ export class CollabUdsListener {
       });
     }
     return [...value];
+  }
+
+  private readPrompt(params: Record<string, unknown>): {
+    message: string;
+    items: UserInput[];
+  } {
+    const message = readString(params.message);
+    const items = parseUserInputs(params.items);
+    const normalizedMessage = message ?? textFromUserInputs(items);
+    if (!normalizedMessage) {
+      throw Object.assign(new Error("Invalid collab request field: message or items"), {
+        code: JSON_RPC_INVALID_PARAMS,
+      });
+    }
+    return { message: normalizedMessage, items };
   }
 }

@@ -15,6 +15,7 @@
   },
   "files": ["dist"],
   "dependencies": {
+    "@codapter/backend-codex": "0.0.1",
     "@codapter/backend-pi": "0.0.1",
     "@codapter/core": "0.0.1",
     "ws": "^8.18.1"

@@ -424,6 +424,12 @@ export class PiProcessSession {
       ...(options.launchConfig?.threadId
         ? { CODAPTER_COLLAB_PARENT_THREAD: options.launchConfig.threadId }
         : {}),
+      ...(options.launchConfig?.availableModelsDescription
+        ? {
+            CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION:
+              options.launchConfig.availableModelsDescription,
+          }
+        : {}),
     };
     this.cwd = options.cwd ?? process.cwd();
     const logFilePath = this.env.CODAPTER_DEBUG_LOG_FILE;

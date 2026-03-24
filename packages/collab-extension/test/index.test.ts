@@ -155,13 +155,46 @@ describe("collabExtension", () => {
       expect(tools).toHaveLength(5);
       const spawnTool = tools.find((tool) => tool.name === "spawn_agent");
       expect(spawnTool).toBeDefined();
+      expect(spawnTool?.description).toContain("Use either `message` or `items`.");
       const execute = spawnTool?.execute as
         | ((toolCallId: string, params: Record<string, unknown>) => Promise<unknown>)
         | undefined;
-      await expect(execute?.("call-1", { message: "hi" })).resolves.toMatchObject({
+      await expect(
+        execute?.("call-1", {
+          items: [{ type: "text", text: "hi" }],
+        })
+      ).resolves.toMatchObject({
         details: { echoed: "collab/spawn" },
       });
     } finally {
+      await server.close();
+    }
+  });
+
+  it("prefers the injected available-models description when present", async () => {
+    const server = await createSocketServer((request, socket) => {
+      socket.write(`${JSON.stringify({ id: request.id, result: { echoed: request.method } })}\n`);
+    });
+    process.env.CODAPTER_COLLAB_UDS = server.socketPath;
+    process.env.CODAPTER_COLLAB_PARENT_THREAD = "thread-1";
+    process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION =
+      "Available models (use the model id exactly as shown):\n- pi::anthropic/claude-opus-4-6: medium\n- gpt-5.4: medium";
+
+    const tools: Array<Record<string, unknown>> = [];
+
+    try {
+      await collabExtension({
+        registerTool(tool) {
+          tools.push(tool);
+        },
+      });
+
+      const spawnTool = tools.find((tool) => tool.name === "spawn_agent");
+      expect(spawnTool).toBeDefined();
+      expect(spawnTool?.description).toContain("pi::anthropic/claude-opus-4-6");
+      expect(spawnTool?.description).toContain("gpt-5.4");
+    } finally {
+      process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION = undefined;
       await server.close();
     }
   });

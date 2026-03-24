@@ -11,6 +11,13 @@ Spawn a sub-agent for a well-scoped task. Returns metadata for exactly one spawn
 
 {available_models_description}
 
+Use either \`message\` or \`items\`. If you already have structured text/image inputs, pass them via \`items\`; otherwise use \`message\`. If both are present, they should describe the same task.
+
+### Parameter guidance
+- Omit \`agent_type\` unless you need a specific role. \`default\` is the normal general-purpose choice.
+- Use \`worker\` for concrete execution or code-edit subtasks with a bounded write scope.
+- Omit \`reasoning_effort\` unless you need to change it. When you do set it, prefer matching the parent unless the task is clearly simpler or harder.
+
 ### When to delegate vs. do the subtask yourself
 - First, quickly analyze the overall user task and form a succinct high-level plan. Identify which tasks are immediate blockers on the critical path, and which tasks are sidecar tasks that can run in parallel without blocking the next local step.
 - Use the smaller subagent when a subtask is easy enough for it to handle and can run in parallel with your local work. Prefer delegating concrete, bounded sidecar tasks that materially advance the main task.
@@ -21,7 +28,7 @@ Spawn a sub-agent for a well-scoped task. Returns metadata for exactly one spawn
 - Subtasks must be concrete, well-defined, and self-contained.
 - Do not duplicate work between the main rollout and delegated subtasks.
 - Narrow the delegated ask to the concrete output you need next.
-- For coding tasks, prefer delegating concrete code-change worker subtasks.
+- For coding tasks, prefer delegating concrete code-change worker subtasks; otherwise leave \`agent_type\` unset.
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 
 ### After you delegate
@@ -37,8 +44,16 @@ Spawn a sub-agent for a well-scoped task. Returns metadata for exactly one spawn
 - Split implementation into disjoint codebase slices and spawn multiple agents.
 - The key is to find opportunities to spawn multiple independent subtasks in parallel within the same round.`;
 
+const InputItem = Type.Object(
+  {
+    type: Type.String(),
+  },
+  { additionalProperties: true }
+);
+
 const SpawnAgentParams = Type.Object({
-  message: Type.String(),
+  message: Type.Optional(Type.String()),
+  items: Type.Optional(Type.Array(InputItem)),
   agent_type: Type.Optional(Type.String()),
   model: Type.Optional(Type.String()),
   reasoning_effort: Type.Optional(Type.String()),
@@ -47,7 +62,8 @@ const SpawnAgentParams = Type.Object({
 
 const SendInputParams = Type.Object({
   id: Type.String(),
-  message: Type.String(),
+  message: Type.Optional(Type.String()),
+  items: Type.Optional(Type.Array(InputItem)),
   interrupt: Type.Optional(Type.Boolean()),
 });
 
@@ -206,6 +222,11 @@ export class CollabClient {
 }
 
 async function fetchAvailableModelsDescription(pi: ExtensionApi): Promise<string> {
+  const embeddedDescription = process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION?.trim();
+  if (embeddedDescription) {
+    return embeddedDescription;
+  }
+
   const sources = [
     pi.listModels?.bind(pi),
     pi.backend?.listModels?.bind(pi.backend),
@@ -258,14 +279,14 @@ async function fetchAvailableModelsDescription(pi: ExtensionApi): Promise<string
         .join("\n");
 
       if (formatted) {
-        return `Available models:\n${formatted}`;
+        return `Available models (use the model id exactly as shown):\n${formatted}`;
       }
     } catch {
       // Fall through to the next model source.
     }
   }
 
-  return "Available models are determined by the active backend session.";
+  return "Available models are determined by the active backend session. When available, use the model id exactly as shown, for example `pi::anthropic/claude-opus-4-6` or `gpt-5.4`.";
 }
 
 function toToolResult(result: unknown) {
