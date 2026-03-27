@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added Pi skills management RPC support in the adapter: `skills/list` discovery, persisted `skills/config/write` enable/disable toggles, and Pi-skill-backed plugin management methods (`plugin/list`, `plugin/read`, `plugin/install`, `plugin/uninstall`) for Codex Desktop skills UI integration. ([#10](https://github.com/kcosr/codapter/pull/10))
+
 ### Changed
 
 ### Fixed
