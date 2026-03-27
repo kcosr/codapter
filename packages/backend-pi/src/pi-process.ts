@@ -214,8 +214,7 @@ function mapUpstreamModel(model: unknown, index: number): BackendModelSummary | 
   const provider = typeof model.provider === "string" ? model.provider : "pi";
   const id = typeof model.id === "string" ? model.id : "unknown";
   const combinedId = normalizeModelKey(provider, id);
-  const displayName =
-    typeof model.name === "string" && model.name.length > 0 ? model.name : combinedId;
+  const displayName = typeof model.name === "string" && model.name.length > 0 ? model.name : id;
   const reasoning = Boolean(model.reasoning);
   const inputModalities = Array.isArray(model.input)
     ? model.input.filter((value): value is string => typeof value === "string")

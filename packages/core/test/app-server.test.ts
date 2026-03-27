@@ -1661,7 +1661,7 @@ describe("AppServerConnection", () => {
             upgrade: null,
             upgradeInfo: null,
             availabilityNux: null,
-            displayName: "pi / Claude Opus 4.6",
+            displayName: "pi / Claude Opus 4.6 (Anthropic)",
             description: "Pi model",
             hidden: false,
             supportedReasoningEfforts: [
