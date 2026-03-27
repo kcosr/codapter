@@ -228,8 +228,12 @@ The Pi backend uses its own configuration at `~/.pi/agent/`:
 | `account/login/cancel` | Cancel login flow |
 | `account/logout` | Logout and clear auth state |
 | `account/rateLimits/read` | Rate limit snapshot |
-| `skills/list` | Returns empty list |
-| `plugin/list` | Returns empty list |
+| `skills/list` | Returns discovered Pi skills grouped by cwd |
+| `skills/config/write` | Enable/disable discovered Pi skills by path |
+| `plugin/list` | Returns a Pi Skills marketplace from discovered skills |
+| `plugin/read` | Returns plugin detail for a discovered Pi skill |
+| `plugin/install` | Marks a discovered Pi skill plugin as installable (no external auth) |
+| `plugin/uninstall` | Removes user/project Pi skill directories |
 | `app/list` | Returns empty list |
 
 ### Stubbed (Return Empty/Default)

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1827,6 +1827,313 @@ describe("AppServerConnection", () => {
         nextCursor: null,
       },
     });
+  });
+
+  it("returns Pi skills grouped by cwd for skills/list", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-skills-list-"));
+    const globalSkillsRoot = join(root, "global-skills");
+    const workspaceCwd = join(root, "workspace");
+    const projectSkillsRoot = join(workspaceCwd, ".pi", "agent", "skills");
+    const extraSkillsRoot = join(root, "extra-skills");
+
+    await mkdir(join(globalSkillsRoot, "global-helper"), { recursive: true });
+    await writeFile(
+      join(globalSkillsRoot, "global-helper", "SKILL.md"),
+      [
+        "---",
+        "name: global-helper",
+        "description: Global helper skill",
+        "---",
+        "",
+        "# Global helper",
+      ].join("\n"),
+      "utf8"
+    );
+
+    await mkdir(join(projectSkillsRoot, "project-helper"), { recursive: true });
+    await writeFile(
+      join(projectSkillsRoot, "project-helper", "SKILL.md"),
+      [
+        "---",
+        "name: project-helper",
+        "description: Project helper skill",
+        "---",
+        "",
+        "# Project helper",
+      ].join("\n"),
+      "utf8"
+    );
+
+    await mkdir(join(extraSkillsRoot, "extra-helper"), { recursive: true });
+    await writeFile(
+      join(extraSkillsRoot, "extra-helper", "SKILL.md"),
+      [
+        "---",
+        "name: extra-helper",
+        "description: Extra root skill",
+        "---",
+        "",
+        "# Extra helper",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      piGlobalSkillsRoot: globalSkillsRoot,
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      const response = await connection.handleMessage({
+        id: 2,
+        method: "skills/list",
+        params: {
+          cwds: [workspaceCwd],
+          forceReload: true,
+          perCwdExtraUserRoots: [[extraSkillsRoot]],
+        },
+      });
+
+      expect(response).toEqual({
+        id: 2,
+        result: {
+          data: [
+            {
+              cwd: workspaceCwd,
+              skills: expect.any(Array),
+              errors: [],
+            },
+          ],
+        },
+      });
+
+      const resultData = (response as { result: { data: Array<Record<string, unknown>> } }).result
+        .data[0];
+      expect(resultData).toBeDefined();
+      const skills = Array.isArray(resultData?.skills) ? resultData.skills : [];
+      expect(skills).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "global-helper",
+            description: "Global helper skill",
+            scope: "user",
+            enabled: true,
+          }),
+          expect.objectContaining({
+            name: "project-helper",
+            description: "Project helper skill",
+            scope: "project",
+            enabled: true,
+          }),
+          expect.objectContaining({
+            name: "extra-helper",
+            description: "Extra root skill",
+            scope: "user",
+            enabled: true,
+          }),
+        ])
+      );
+      expect(skills[0]).toEqual(
+        expect.objectContaining({
+          interface: expect.objectContaining({
+            displayName: expect.any(String),
+            shortDescription: expect.any(String),
+            iconSmall: null,
+            iconLarge: null,
+            brandColor: null,
+            defaultPrompt: null,
+          }),
+        })
+      );
+    } finally {
+      await connection.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("supports skills/config/write and plugin management for discovered Pi skills", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codapter-skills-manage-"));
+    const globalSkillsRoot = join(root, "global-skills");
+    const workspaceCwd = join(root, "workspace");
+    await mkdir(join(globalSkillsRoot, "global-helper"), { recursive: true });
+    const globalSkillPath = join(globalSkillsRoot, "global-helper", "SKILL.md");
+    await writeFile(
+      globalSkillPath,
+      [
+        "---",
+        "name: global-helper",
+        "description: Global helper skill",
+        "---",
+        "",
+        "# Global helper",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const connection = new AppServerConnection({
+      backend: createBackend(),
+      piGlobalSkillsRoot: globalSkillsRoot,
+      onMessage: (message) => {
+        if ("method" in message && typeof message.method === "string") {
+          notifications.push({ method: message.method, params: message.params });
+        }
+      },
+    });
+
+    try {
+      await connection.handleMessage({
+        id: 1,
+        method: "initialize",
+        params: {
+          clientInfo: { name: "codapter-test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 2,
+          method: "skills/config/write",
+          params: {
+            path: globalSkillPath,
+            enabled: false,
+          },
+        })
+      ).resolves.toEqual({
+        id: 2,
+        result: {
+          effectiveEnabled: false,
+        },
+      });
+
+      const skillsResponse = await connection.handleMessage({
+        id: 3,
+        method: "skills/list",
+        params: {
+          cwds: [workspaceCwd],
+          forceReload: true,
+          perCwdExtraUserRoots: null,
+        },
+      });
+      const listedSkill = (
+        (skillsResponse as { result: { data: Array<Record<string, unknown>> } }).result.data[0]
+          ?.skills as Array<Record<string, unknown>>
+      ).find((skill) => skill.name === "global-helper");
+      expect(listedSkill).toEqual(
+        expect.objectContaining({
+          enabled: false,
+        })
+      );
+
+      const pluginList = await connection.handleMessage({
+        id: 4,
+        method: "plugin/list",
+        params: {
+          cwds: [workspaceCwd],
+          forceRemoteSync: false,
+        },
+      });
+      expect(pluginList).toEqual({
+        id: 4,
+        result: expect.objectContaining({
+          marketplaces: [
+            expect.objectContaining({
+              name: "pi-skills",
+              plugins: expect.arrayContaining([
+                expect.objectContaining({
+                  id: "global-helper@pi-skills",
+                  name: "global-helper",
+                }),
+              ]),
+            }),
+          ],
+        }),
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 5,
+          method: "plugin/read",
+          params: {
+            marketplacePath: globalSkillsRoot,
+            pluginName: "global-helper",
+          },
+        })
+      ).resolves.toEqual({
+        id: 5,
+        result: {
+          plugin: expect.objectContaining({
+            marketplaceName: "Pi Skills",
+            skills: expect.arrayContaining([
+              expect.objectContaining({
+                name: "global-helper",
+              }),
+            ]),
+          }),
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 6,
+          method: "plugin/install",
+          params: {
+            marketplacePath: globalSkillsRoot,
+            pluginName: "global-helper",
+          },
+        })
+      ).resolves.toEqual({
+        id: 6,
+        result: {
+          authPolicy: "NONE",
+          appsNeedingAuth: [],
+        },
+      });
+
+      await expect(
+        connection.handleMessage({
+          id: 7,
+          method: "plugin/uninstall",
+          params: {
+            pluginId: "global-helper@pi-skills",
+          },
+        })
+      ).resolves.toEqual({
+        id: 7,
+        result: {},
+      });
+
+      const skillsAfterUninstall = await connection.handleMessage({
+        id: 8,
+        method: "skills/list",
+        params: {
+          cwds: [workspaceCwd],
+          forceReload: true,
+          perCwdExtraUserRoots: null,
+        },
+      });
+      const afterSkills =
+        ((skillsAfterUninstall as { result: { data: Array<Record<string, unknown>> } }).result
+          .data[0]?.skills as Array<Record<string, unknown>>) ?? [];
+      expect(afterSkills.some((skill) => skill.name === "global-helper")).toBe(false);
+
+      expect(notifications.some((notification) => notification.method === "skills/changed")).toBe(
+        true
+      );
+    } finally {
+      await connection.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("returns method-not-found and logs unrecognized methods", async () => {
