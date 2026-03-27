@@ -2,6 +2,7 @@ import type { BackendModelSummary, IBackend, ParsedBackendSelection } from "./ba
 import { encodeBackendModelId, parseBackendModelId } from "./backend.js";
 
 const NATIVE_BACKEND_TYPE = "codex";
+const PI_BACKEND_TYPE = "pi";
 
 interface AggregatedModelEntry extends BackendModelSummary {
   readonly backendType: string;
@@ -27,6 +28,42 @@ function cloneModelListResult(result: BackendModelListResult): BackendModelListR
   };
 }
 
+function humanizeProvider(provider: string): string {
+  switch (provider.toLowerCase()) {
+    case "openai-codex":
+      return "OpenAI Codex";
+    case "openai":
+      return "OpenAI";
+    case "anthropic":
+      return "Anthropic";
+    case "google":
+      return "Google";
+    case "xai":
+      return "xAI";
+    case "openrouter":
+      return "OpenRouter";
+    case "ollama":
+      return "Ollama";
+    case "github-copilot":
+      return "GitHub Copilot";
+    case "pi":
+      return "Pi";
+    default:
+      return provider
+        .split(/[-_]/g)
+        .filter((part) => part.length > 0)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+  }
+}
+
+function formatPiDisplayName(model: BackendModelSummary): string {
+  const separatorIndex = model.model.indexOf("/");
+  const provider = separatorIndex > 0 ? model.model.slice(0, separatorIndex) : null;
+  const providerLabel = provider ? ` (${humanizeProvider(provider)})` : "";
+  return `pi / ${model.displayName}${providerLabel}`;
+}
+
 function toAggregatedModel(backendType: string, model: BackendModelSummary): AggregatedModelEntry {
   const exposedId =
     backendType === NATIVE_BACKEND_TYPE ? model.id : encodeBackendModelId(backendType, model.id);
@@ -41,7 +78,9 @@ function toAggregatedModel(backendType: string, model: BackendModelSummary): Agg
     displayName:
       backendType === NATIVE_BACKEND_TYPE
         ? model.displayName
-        : `${backendType} / ${model.displayName}`,
+        : backendType === PI_BACKEND_TYPE
+          ? formatPiDisplayName(model)
+          : `${backendType} / ${model.displayName}`,
     isDefault: model.isDefault,
     backendType,
   };
