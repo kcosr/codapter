@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Improved Pi model display names in the aggregated model list ([#9](https://github.com/kcosr/codapter/pull/9) by [@gustavonline](https://github.com/gustavonline))
+
 ### Fixed
 
 ### Removed
