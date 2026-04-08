@@ -38,6 +38,7 @@ async function createMockPiScript(rootDir: string): Promise<string> {
     "if (capturePath) {",
     "  await writeFile(capturePath, JSON.stringify({",
     "    argv: process.argv.slice(2),",
+    "    cwd: process.cwd(),",
     "    collabSocketPath: process.env.CODAPTER_COLLAB_UDS ?? null,",
     "    parentThreadId: process.env.CODAPTER_COLLAB_PARENT_THREAD ?? null,",
     "    availableModelsDescription: process.env.CODAPTER_COLLAB_AVAILABLE_MODELS_DESCRIPTION ?? null,",
@@ -804,6 +805,94 @@ describe("PiBackend", () => {
       expect(launches).toHaveLength(1);
     } finally {
       await backend.dispose();
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the thread cwd when launching start, resume, and fork sessions", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "codapter-backend-pi-cwd-"));
+    const sessionDir = join(rootDir, "sessions");
+    const backendDefaultCwd = join(rootDir, "backend-default");
+    const threadCwd = join(rootDir, "thread-workspace");
+    const resumedCwd = join(rootDir, "resume-workspace");
+    const forkedCwd = join(rootDir, "fork-workspace");
+    const capturePath = join(rootDir, "launch.json");
+    const captureResumePath = join(rootDir, "launch-resume.json");
+    await mkdir(sessionDir, { recursive: true });
+    await mkdir(backendDefaultCwd, { recursive: true });
+    await mkdir(threadCwd, { recursive: true });
+    await mkdir(resumedCwd, { recursive: true });
+    await mkdir(forkedCwd, { recursive: true });
+    const scriptPath = await createMockPiScript(rootDir);
+
+    const backend = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+      cwd: backendDefaultCwd,
+      env: {
+        ...process.env,
+        CODAPTER_CAPTURE_PROCESS_PATH: capturePath,
+      },
+    });
+
+    let threadHandle = "";
+    try {
+      await backend.initialize();
+      const started = await backend.threadStart({
+        threadId: "thread-cwd-start",
+        cwd: threadCwd,
+        model: null,
+        reasoningEffort: null,
+      });
+      threadHandle = started.threadHandle;
+
+      expect(JSON.parse(await readFile(capturePath, "utf8"))).toMatchObject({
+        cwd: threadCwd,
+      });
+
+      await backend.threadFork({
+        threadId: "thread-cwd-fork",
+        sourceThreadId: "thread-cwd-start",
+        sourceThreadHandle: started.threadHandle,
+        cwd: forkedCwd,
+        model: null,
+        reasoningEffort: null,
+      });
+
+      expect(JSON.parse(await readFile(capturePath, "utf8"))).toMatchObject({
+        cwd: forkedCwd,
+      });
+    } finally {
+      await backend.dispose();
+    }
+
+    const reopened = createPiBackend({
+      sessionDir,
+      command: process.execPath,
+      args: [scriptPath, sessionDir],
+      cwd: backendDefaultCwd,
+      env: {
+        ...process.env,
+        CODAPTER_CAPTURE_PROCESS_PATH: captureResumePath,
+      },
+    });
+
+    try {
+      await reopened.initialize();
+      await reopened.threadResume({
+        threadId: "thread-cwd-resume",
+        threadHandle,
+        cwd: resumedCwd,
+        model: null,
+        reasoningEffort: null,
+      });
+
+      expect(JSON.parse(await readFile(captureResumePath, "utf8"))).toMatchObject({
+        cwd: resumedCwd,
+      });
+    } finally {
+      await reopened.dispose();
       await rm(rootDir, { recursive: true, force: true });
     }
   });

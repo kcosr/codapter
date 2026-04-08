@@ -559,7 +559,8 @@ export class PiBackend implements IBackend {
   }
 
   async threadStart(input: BackendThreadStartInput): Promise<BackendThreadStartResult> {
-    const threadHandle = await this.createSession(input.launchConfig);
+    const launchConfig = { ...input.launchConfig, cwd: input.cwd };
+    const threadHandle = await this.createSession(launchConfig);
     if (input.model) {
       await this.setModel(threadHandle, input.model);
     }
@@ -573,7 +574,8 @@ export class PiBackend implements IBackend {
   }
 
   async threadResume(input: BackendThreadResumeInput): Promise<BackendThreadResumeResult> {
-    const threadHandle = await this.resumeSession(input.threadHandle, input.launchConfig);
+    const launchConfig = { ...input.launchConfig, cwd: input.cwd };
+    const threadHandle = await this.resumeSession(input.threadHandle, launchConfig);
     if (input.model) {
       await this.setModel(threadHandle, input.model);
     }
@@ -587,7 +589,8 @@ export class PiBackend implements IBackend {
   }
 
   async threadFork(input: BackendThreadForkInput): Promise<BackendThreadForkResult> {
-    const threadHandle = await this.forkSession(input.sourceThreadHandle, input.launchConfig);
+    const launchConfig = { ...input.launchConfig, cwd: input.cwd };
+    const threadHandle = await this.forkSession(input.sourceThreadHandle, launchConfig);
     if (input.model) {
       await this.setModel(threadHandle, input.model);
     }
@@ -940,6 +943,7 @@ export class PiBackend implements IBackend {
       sessionDir: this.sessionDir,
       opaqueSessionId: sessionId,
       ...this.launchOptions,
+      ...(effectiveLaunchConfig?.cwd ? { cwd: effectiveLaunchConfig.cwd } : {}),
       ...(this.collabExtensionPath !== null
         ? { collabExtensionPath: this.collabExtensionPath }
         : {}),

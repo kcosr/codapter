@@ -6,6 +6,7 @@ export interface Disposable {
 }
 
 export interface BackendSessionLaunchConfig {
+  readonly cwd?: string | null;
   readonly threadId?: string | null;
   readonly collabSocketPath?: string | null;
   readonly availableModelsDescription?: string | null;
