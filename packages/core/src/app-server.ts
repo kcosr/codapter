@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { validateHeaderValue } from "node:http";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { BackendRouter, type RoutedBackendSelection } from "./backend-router.js";
 import type {
   BackendAppServerEvent,
@@ -66,9 +66,11 @@ import type {
   McpServerStatusListResponse,
   ModelListResponse,
   PlanType,
+  PluginListParams,
   PluginListResponse,
   SandboxMode,
   SandboxPolicy,
+  SkillsListParams,
   SkillsListResponse,
   Thread,
   ThreadArchiveParams,
@@ -121,6 +123,10 @@ const INTERNAL_TITLE_THREAD_PROMPT_PREFIX =
   "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task";
 const INTERNAL_TITLE_THREAD_PROMPT_MARKER = "Generate a concise UI title";
 const INTERNAL_TITLE_THREAD_PREVIEW_PREFIX = INTERNAL_TITLE_THREAD_PROMPT_PREFIX.slice(0, 120);
+const DEFAULT_PI_GLOBAL_SKILLS_ROOT = resolve(homedir(), ".pi", "agent", "skills");
+const DEFAULT_PI_PROJECT_SKILLS_RELATIVE_PATH = ".pi/agent/skills";
+const PI_SKILLS_ENABLED_OVERRIDES_CONFIG_KEY = "pi_skills_enabled_overrides";
+const PI_SKILLS_MARKETPLACE_NAME = "Pi Skills";
 
 export interface AppServerIdentity {
   readonly userAgent: string;
@@ -150,6 +156,8 @@ export interface AppServerConnectionOptions {
   readonly debugLogFilePath?: string | null;
   readonly threadRegistry?: ThreadRegistry;
   readonly onMessage?: (message: AppServerOutgoingMessage) => void | Promise<void>;
+  readonly piGlobalSkillsRoot?: string | null;
+  readonly piProjectSkillsRelativePath?: string | null;
 }
 
 interface ConnectionState {
@@ -576,10 +584,150 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function titleCaseFromSlug(value: string): string {
+  return value
+    .split(/[-_]+/g)
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function parseFrontmatterValue(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed.charAt(0);
+    const last = trimmed.charAt(trimmed.length - 1);
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return trimmed.slice(1, -1).trim();
+    }
+  }
+  return trimmed;
+}
+
+function parseSkillFrontmatter(markdown: string): {
+  name: string | null;
+  description: string | null;
+} {
+  const frontmatterMatch = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!frontmatterMatch) {
+    return {
+      name: null,
+      description: null,
+    };
+  }
+
+  let name: string | null = null;
+  let description: string | null = null;
+  for (const line of frontmatterMatch[1].split(/\r?\n/g)) {
+    const match = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.+)$/);
+    if (!match) {
+      continue;
+    }
+
+    const key = match[1].toLowerCase();
+    const value = parseFrontmatterValue(match[2]);
+    if (value.length === 0) {
+      continue;
+    }
+
+    if (key === "name") {
+      name = value;
+      continue;
+    }
+    if (key === "description") {
+      description = value;
+    }
+  }
+
+  return {
+    name,
+    description,
+  };
+}
+
+async function discoverSkillFiles(rootPath: string): Promise<string[]> {
+  const skillFiles: string[] = [];
+  const stack = [rootPath];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+
+    try {
+      const entries = await readdir(current, { withFileTypes: true });
+      for (const entry of entries) {
+        const entryPath = join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(entryPath);
+          continue;
+        }
+        if (entry.isFile() && entry.name === "SKILL.md") {
+          skillFiles.push(entryPath);
+        }
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return skillFiles;
+}
+
+function isPathWithin(rootPath: string, targetPath: string): boolean {
+  const normalizedRoot = resolve(rootPath);
+  const normalizedTarget = resolve(targetPath);
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`);
+}
+
 interface NativeSubAgentInfo {
   readonly localThreadId: string;
   readonly backendThreadId: string;
   readonly nickname: string | null;
+}
+
+interface DiscoveredSkillInterface {
+  readonly displayName: string;
+  readonly shortDescription: string;
+  readonly iconSmall: string | null;
+  readonly iconLarge: string | null;
+  readonly brandColor: string | null;
+  readonly defaultPrompt: string | null;
+  readonly [key: string]: JsonValue | undefined;
+}
+
+interface DiscoveredSkill {
+  readonly name: string;
+  readonly description: string;
+  readonly interface: DiscoveredSkillInterface;
+  readonly path: string;
+  readonly scope: string;
+  readonly enabled: boolean;
+  readonly [key: string]: JsonValue | undefined;
+}
+
+interface SkillsConfigWriteParams {
+  readonly path: string;
+  readonly enabled: boolean;
+}
+
+interface PluginReadParams {
+  readonly marketplacePath: string;
+  readonly pluginName: string;
+}
+
+interface PluginInstallParams {
+  readonly marketplacePath: string;
+  readonly pluginName: string;
+}
+
+interface PluginUninstallParams {
+  readonly pluginId: string;
 }
 
 function backendEventTurnId(event: BackendAppServerEvent): string | null {
@@ -607,6 +755,8 @@ export class AppServerConnection {
     | undefined;
   private readonly commandExecManager: CommandExecManager;
   private readonly collabEnabled: boolean;
+  private readonly piGlobalSkillsRoot: string | null;
+  private readonly piProjectSkillsRelativePath: string | null;
   private readonly collabManager: CollabManager | null;
   private readonly collabUdsListener: CollabUdsListener | null;
   private readonly collabReady: Promise<void>;
@@ -643,6 +793,9 @@ export class AppServerConnection {
       options.threadRegistry ?? new ThreadRegistry(undefined, this.logger as ThreadRegistryLogger);
     this.onMessage = options.onMessage;
     this.collabEnabled = Boolean(options.collabEnabled);
+    this.piGlobalSkillsRoot = options.piGlobalSkillsRoot ?? DEFAULT_PI_GLOBAL_SKILLS_ROOT;
+    this.piProjectSkillsRelativePath =
+      options.piProjectSkillsRelativePath ?? DEFAULT_PI_PROJECT_SKILLS_RELATIVE_PATH;
     this.commandExecManager = new CommandExecManager({
       onNotification: async (notification) => {
         await this.publish(notification.method, notification.params);
@@ -787,9 +940,17 @@ export class AppServerConnection {
         case "getAuthStatus":
           return success(request.id, this.handleGetAuthStatus(request.params));
         case "skills/list":
-          return success(request.id, this.handleSkillsList());
+          return success(request.id, await this.handleSkillsList(request.params));
+        case "skills/config/write":
+          return success(request.id, await this.handleSkillsConfigWrite(request.params));
         case "plugin/list":
-          return success(request.id, this.handlePluginList());
+          return success(request.id, await this.handlePluginList(request.params));
+        case "plugin/read":
+          return success(request.id, await this.handlePluginRead(request.params));
+        case "plugin/install":
+          return success(request.id, await this.handlePluginInstall(request.params));
+        case "plugin/uninstall":
+          return success(request.id, await this.handlePluginUninstall(request.params));
         case "app/list":
           return success(request.id, this.handleAppList(request.params));
         case "model/list":
@@ -1235,15 +1396,411 @@ export class AppServerConnection {
     await this.publish("account/updated", this.currentAccountUpdatedNotification());
   }
 
-  private handleSkillsList(): SkillsListResponse {
-    return { data: [] };
+  private parseSkillsListCwds(params: SkillsListParams): string[] {
+    const cwds = Array.isArray(params.cwds)
+      ? params.cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+      : [];
+    return cwds.length > 0 ? cwds : [process.cwd()];
   }
 
-  private handlePluginList(): PluginListResponse {
+  private parsePerCwdExtraSkillRoots(
+    perCwdExtraUserRoots: JsonValue[] | null | undefined,
+    cwdCount: number
+  ): string[][] {
+    const rootsByCwd = Array.from({ length: cwdCount }, () => [] as string[]);
+    if (!Array.isArray(perCwdExtraUserRoots)) {
+      return rootsByCwd;
+    }
+
+    for (let index = 0; index < Math.min(cwdCount, perCwdExtraUserRoots.length); index += 1) {
+      const entry = perCwdExtraUserRoots[index];
+      if (typeof entry === "string" && entry.length > 0) {
+        rootsByCwd[index]?.push(entry);
+        continue;
+      }
+      if (Array.isArray(entry)) {
+        for (const root of entry) {
+          if (typeof root === "string" && root.length > 0) {
+            rootsByCwd[index]?.push(root);
+          }
+        }
+        continue;
+      }
+      if (isRecord(entry) && Array.isArray(entry.roots)) {
+        for (const root of entry.roots) {
+          if (typeof root === "string" && root.length > 0) {
+            rootsByCwd[index]?.push(root);
+          }
+        }
+      }
+    }
+
+    return rootsByCwd;
+  }
+
+  private readSkillEnabledOverrides(): Record<string, boolean> {
+    const config = this.configStore.read({ includeLayers: false }).config;
+    const raw = config[PI_SKILLS_ENABLED_OVERRIDES_CONFIG_KEY];
+    if (!isRecord(raw)) {
+      return {};
+    }
+
+    const overrides: Record<string, boolean> = {};
+    for (const [path, enabled] of Object.entries(raw)) {
+      if (typeof enabled === "boolean") {
+        overrides[path] = enabled;
+      }
+    }
+    return overrides;
+  }
+
+  private writeSkillEnabledOverrides(overrides: Record<string, boolean>): void {
+    this.configStore.writeValue({
+      keyPath: PI_SKILLS_ENABLED_OVERRIDES_CONFIG_KEY,
+      value: overrides,
+      mergeStrategy: "replace",
+    });
+  }
+
+  private async collectPiSkillsForRoots(
+    roots: readonly { path: string; scope: string }[],
+    enabledOverrides: Readonly<Record<string, boolean>>
+  ): Promise<{ skills: DiscoveredSkill[]; errors: JsonValue[] }> {
+    const skills: DiscoveredSkill[] = [];
+    const errors: JsonValue[] = [];
+    const seenPaths = new Set<string>();
+
+    for (const root of roots) {
+      let skillPaths: string[];
+      try {
+        skillPaths = await discoverSkillFiles(root.path);
+      } catch (error) {
+        errors.push({
+          root: root.path,
+          scope: root.scope,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+
+      skillPaths.sort((left, right) => left.localeCompare(right));
+      for (const skillPath of skillPaths) {
+        if (seenPaths.has(skillPath)) {
+          continue;
+        }
+        seenPaths.add(skillPath);
+
+        let markdown: string;
+        try {
+          markdown = await readFile(skillPath, "utf8");
+        } catch (error) {
+          errors.push({
+            root: root.path,
+            scope: root.scope,
+            path: skillPath,
+            message: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+
+        const frontmatter = parseSkillFrontmatter(markdown);
+        const fallbackName = basename(dirname(skillPath));
+        const name = frontmatter.name ?? fallbackName;
+        const description = frontmatter.description ?? `Pi skill available at ${skillPath}`;
+        const enabled = enabledOverrides[skillPath] ?? true;
+
+        skills.push({
+          name,
+          description,
+          interface: {
+            displayName: titleCaseFromSlug(name),
+            shortDescription: description,
+            iconSmall: null,
+            iconLarge: null,
+            brandColor: null,
+            defaultPrompt: null,
+          },
+          path: skillPath,
+          scope: root.scope,
+          enabled,
+        });
+      }
+    }
+
+    skills.sort((left, right) => left.name.localeCompare(right.name));
     return {
-      marketplaces: [],
-      remoteSyncError: null,
+      skills,
+      errors,
     };
+  }
+
+  private async listDiscoveredSkillsByCwd(
+    cwds: readonly string[],
+    extraRootsByCwd: readonly string[][]
+  ): Promise<Array<{ cwd: string; skills: DiscoveredSkill[]; errors: JsonValue[] }>> {
+    const enabledOverrides = this.readSkillEnabledOverrides();
+    const results: Array<{ cwd: string; skills: DiscoveredSkill[]; errors: JsonValue[] }> = [];
+
+    for (const [index, cwd] of cwds.entries()) {
+      const rawRoots: Array<{ path: string; scope: string }> = [];
+      if (this.piGlobalSkillsRoot) {
+        rawRoots.push({
+          path: this.piGlobalSkillsRoot,
+          scope: "user",
+        });
+      }
+      if (this.piProjectSkillsRelativePath) {
+        rawRoots.push({
+          path: join(cwd, this.piProjectSkillsRelativePath),
+          scope: "project",
+        });
+      }
+      for (const extraRoot of extraRootsByCwd[index] ?? []) {
+        rawRoots.push({
+          path: resolve(cwd, extraRoot),
+          scope: "user",
+        });
+      }
+
+      const seenRoots = new Set<string>();
+      const uniqueRoots: Array<{ path: string; scope: string }> = [];
+      for (const root of rawRoots) {
+        const resolvedPath = resolve(root.path);
+        if (seenRoots.has(resolvedPath)) {
+          continue;
+        }
+        seenRoots.add(resolvedPath);
+        uniqueRoots.push({
+          path: resolvedPath,
+          scope: root.scope,
+        });
+      }
+
+      const { skills, errors } = await this.collectPiSkillsForRoots(uniqueRoots, enabledOverrides);
+      results.push({
+        cwd,
+        skills,
+        errors,
+      });
+    }
+
+    return results;
+  }
+
+  private async handleSkillsList(params: unknown): Promise<SkillsListResponse> {
+    const parsed = (params ?? {}) as SkillsListParams;
+    const cwds = this.parseSkillsListCwds(parsed);
+    const extraRootsByCwd = this.parsePerCwdExtraSkillRoots(
+      parsed.perCwdExtraUserRoots,
+      cwds.length
+    );
+
+    const rows = await this.listDiscoveredSkillsByCwd(cwds, extraRootsByCwd);
+    return {
+      data: rows.map((row) => ({
+        cwd: row.cwd,
+        skills: row.skills,
+        errors: row.errors,
+      })),
+    };
+  }
+
+  private async handleSkillsConfigWrite(params: unknown): Promise<{ effectiveEnabled: boolean }> {
+    if (
+      !isRecord(params) ||
+      typeof params.path !== "string" ||
+      typeof params.enabled !== "boolean"
+    ) {
+      throw new Error("Invalid skills/config/write params");
+    }
+
+    const path = resolve(params.path);
+    const enabled = params.enabled;
+    const overrides = this.readSkillEnabledOverrides();
+    overrides[path] = enabled;
+    this.writeSkillEnabledOverrides(overrides);
+    await this.publish("skills/changed", {
+      path,
+      enabled,
+    });
+    return {
+      effectiveEnabled: enabled,
+    };
+  }
+
+  private parsePluginListCwds(params: PluginListParams): string[] {
+    const cwds = Array.isArray(params.cwds)
+      ? params.cwds.filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+      : [];
+    return cwds.length > 0 ? cwds : [process.cwd()];
+  }
+
+  private toPluginSummary(skill: DiscoveredSkill): JsonValue {
+    const pluginId = `${skill.name}@pi-skills`;
+    return {
+      id: pluginId,
+      name: skill.name,
+      source: {
+        type: "local",
+        path: dirname(skill.path),
+      },
+      installed: true,
+      enabled: skill.enabled,
+      installPolicy: "INSTALLED",
+      authPolicy: "NONE",
+      interface: {
+        displayName: skill.interface.displayName,
+        shortDescription: skill.interface.shortDescription,
+        longDescription: skill.description,
+        developerName: "Pi",
+        category: "Skills",
+        capabilities: [],
+        websiteUrl: null,
+        privacyPolicyUrl: null,
+        termsOfServiceUrl: null,
+        defaultPrompt:
+          skill.interface.defaultPrompt !== null
+            ? [skill.interface.defaultPrompt]
+            : [skill.description],
+        brandColor: skill.interface.brandColor,
+        composerIcon: skill.interface.iconSmall,
+        logo: skill.interface.iconLarge,
+        screenshots: [],
+      },
+    };
+  }
+
+  private async handlePluginList(params: unknown): Promise<PluginListResponse> {
+    const parsed = (params ?? {}) as PluginListParams;
+    const cwds = this.parsePluginListCwds(parsed);
+    const discoveredByCwd = await this.listDiscoveredSkillsByCwd(
+      cwds,
+      Array.from({ length: cwds.length }, () => [])
+    );
+
+    const skillsByName = new Map<string, DiscoveredSkill>();
+    for (const entry of discoveredByCwd) {
+      for (const skill of entry.skills) {
+        if (!skillsByName.has(skill.name)) {
+          skillsByName.set(skill.name, skill);
+        }
+      }
+    }
+
+    return {
+      marketplaces: [
+        {
+          name: "pi-skills",
+          path: this.piGlobalSkillsRoot ?? DEFAULT_PI_GLOBAL_SKILLS_ROOT,
+          interface: {
+            displayName: PI_SKILLS_MARKETPLACE_NAME,
+          },
+          plugins: [...skillsByName.values()].map((skill) => this.toPluginSummary(skill)),
+        },
+      ],
+      remoteSyncError: null,
+      marketplaceLoadErrors: [],
+      featuredPluginIds: [],
+    } as PluginListResponse;
+  }
+
+  private async handlePluginRead(params: unknown): Promise<{ plugin: JsonValue }> {
+    if (
+      !isRecord(params) ||
+      typeof params.marketplacePath !== "string" ||
+      typeof params.pluginName !== "string"
+    ) {
+      throw new Error("Invalid plugin/read params");
+    }
+
+    const skillsRows = await this.listDiscoveredSkillsByCwd([process.cwd()], [[]]);
+    const skills = skillsRows.flatMap((row) => row.skills);
+    const skill = skills.find((candidate) => candidate.name === params.pluginName);
+    if (!skill) {
+      throw new Error(`Unknown plugin: ${params.pluginName}`);
+    }
+
+    return {
+      plugin: {
+        marketplaceName: PI_SKILLS_MARKETPLACE_NAME,
+        marketplacePath: params.marketplacePath,
+        summary: this.toPluginSummary(skill),
+        description: skill.description,
+        skills: [skill],
+        apps: [],
+        mcpServers: [],
+      },
+    };
+  }
+
+  private async handlePluginInstall(
+    params: unknown
+  ): Promise<{ authPolicy: string; appsNeedingAuth: JsonValue[] }> {
+    if (
+      !isRecord(params) ||
+      typeof params.marketplacePath !== "string" ||
+      typeof params.pluginName !== "string"
+    ) {
+      throw new Error("Invalid plugin/install params");
+    }
+
+    const skillsRows = await this.listDiscoveredSkillsByCwd([process.cwd()], [[]]);
+    const skills = skillsRows.flatMap((row) => row.skills);
+    const skill = skills.find((candidate) => candidate.name === params.pluginName);
+    if (!skill) {
+      throw new Error(`Unknown plugin: ${params.pluginName}`);
+    }
+
+    await this.publish("skills/changed", {
+      pluginName: skill.name,
+      action: "install",
+    });
+    return {
+      authPolicy: "NONE",
+      appsNeedingAuth: [],
+    };
+  }
+
+  private async handlePluginUninstall(params: unknown): Promise<Record<string, never>> {
+    const parsed = params as PluginUninstallParams;
+    if (!parsed || typeof parsed.pluginId !== "string") {
+      throw new Error("Invalid plugin/uninstall params");
+    }
+
+    const pluginName = parsed.pluginId.split("@")[0] ?? parsed.pluginId;
+    const skillsRows = await this.listDiscoveredSkillsByCwd([process.cwd()], [[]]);
+    const skills = skillsRows.flatMap((row) => row.skills);
+    const skill = skills.find((candidate) => candidate.name === pluginName);
+    if (!skill) {
+      return {};
+    }
+
+    if (skill.scope === "system") {
+      throw new Error(`Cannot uninstall system skill: ${skill.name}`);
+    }
+
+    const skillDirectory = dirname(skill.path);
+    if (
+      !isPathWithin(this.piGlobalSkillsRoot ?? DEFAULT_PI_GLOBAL_SKILLS_ROOT, skillDirectory) &&
+      !skill.path.includes(`/${DEFAULT_PI_PROJECT_SKILLS_RELATIVE_PATH}/`)
+    ) {
+      throw new Error(`Refusing to uninstall skill outside managed roots: ${skill.path}`);
+    }
+
+    await rm(skillDirectory, { recursive: true, force: true });
+
+    const overrides = this.readSkillEnabledOverrides();
+    for (const knownPath of Object.keys(overrides)) {
+      if (isPathWithin(skillDirectory, knownPath)) {
+        delete overrides[knownPath];
+      }
+    }
+    this.writeSkillEnabledOverrides(overrides);
+    await this.publish("skills/changed", {
+      pluginId: parsed.pluginId,
+      action: "uninstall",
+    });
+    return {};
   }
 
   private handleAppList(_params: unknown): AppListResponse {
