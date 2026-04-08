@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Fixed Pi thread cwd propagation so Pi sessions start, resume, and fork in the thread workspace instead of falling back to the backend default cwd ([#8](https://github.com/kcosr/codapter/pull/8) by [@IgorWarzocha](https://github.com/IgorWarzocha))
+
 ### Removed
 
 ## [0.0.4] - 2026-03-24
